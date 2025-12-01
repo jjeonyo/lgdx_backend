@@ -1,1 +1,75 @@
+# ============================
+#  기본 공통 무시 파일
+# ============================
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+
+# ============================
+#  Python
+# ============================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.pkl
+*.egg-info/
 .env
+venv/
+ENV/
+.venv/
+.ipynb_checkpoints/
+
+# ============================
+#  Secret / Credential Files (무조건 차단)
+# ============================
+**/serviceAccountKey.json
+**/application-*.yml     # Spring Boot 환경파일(ex: application-prod.yml)
+**/*.pem
+**/*.key
+**/*.p12
+**/.env
+**/.env.*
+
+# ============================
+#  Spring Boot / Java
+# ============================
+target/
+build/
+*.iml
+.idea/
+.gradle/
+out/
+*.class
+*.war
+*.jar
+
+# ============================
+#  Node / Frontend
+# ============================
+node_modules/
+dist/
+build/
+*.local
+.env.local
+.env.production
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ============================
+#  OS / Editor
+# ============================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ============================
+#  프로젝트 내부에서 사용하지 않을 폴더
+# ============================
+frontend/
+Spring\ Boot/
