@@ -73,3 +73,4 @@ yarn-error.log*
 # ============================
 frontend/
 Spring\ Boot/
+serviceAccountKey.json

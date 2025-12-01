@@ -9,6 +9,8 @@ import warnings
 import traceback
 import threading
 import queue
+import speech_recognition as sr
+import audioop
 from dotenv import load_dotenv
 
 # [Firebase 라이브러리 추가]
@@ -297,7 +299,7 @@ def get_config():
             pass
 
     return {
-        "response_modalities": ["AUDIO", "TEXT"], 
+        "response_modalities": ["AUDIO"], 
         "speech_config": {
             "voice_config": {
                 "prebuilt_voice_config": {
@@ -307,6 +309,70 @@ def get_config():
         },
         "system_instruction": system_instruction
     }
+
+# ==========================================
+# [클래스] STT 처리기
+# ==========================================
+class SpeechTranscriber:
+    def __init__(self, sample_rate, on_text_recognized):
+        self.sample_rate = sample_rate
+        self.on_text_recognized = on_text_recognized 
+        self.audio_queue = queue.Queue()
+        self.running = True
+        self.recognizer = sr.Recognizer()
+        
+        self.thread = threading.Thread(target=self._process_loop, daemon=True)
+        self.thread.start()
+        
+    def add_audio(self, data):
+        if self.running: self.audio_queue.put(data)
+            
+    def stop(self):
+        self.running = False
+        if self.thread.is_alive(): self.thread.join(timeout=1.0)
+
+    def _process_loop(self):
+        audio_buffer = bytearray()
+        silence_frames = 0
+        has_voice = False
+        
+        chunk_duration = 512 / self.sample_rate
+        pause_frame_count = int(0.6 / chunk_duration) 
+        
+        while self.running:
+            try:
+                data = self.audio_queue.get(timeout=1.0)
+                rms = audioop.rms(data, 2) 
+                
+                if rms > 500:
+                    has_voice = True
+                    silence_frames = 0
+                else:
+                    if has_voice: silence_frames += 1
+                
+                if has_voice: audio_buffer.extend(data)
+                
+                if has_voice and silence_frames > pause_frame_count:
+                    self._recognize(audio_buffer)
+                    audio_buffer = bytearray()
+                    silence_frames = 0
+                    has_voice = False
+                    
+                if len(audio_buffer) > self.sample_rate * 2 * 10:
+                    self._recognize(audio_buffer)
+                    audio_buffer = bytearray()
+                    has_voice = False
+
+            except queue.Empty: continue
+            except Exception: continue
+                
+    def _recognize(self, audio_data):
+        if len(audio_data) < self.sample_rate * 2 * 0.3: return
+        try:
+            audio_source = sr.AudioData(bytes(audio_data), self.sample_rate, 2)
+            text = self.recognizer.recognize_google(audio_source, language="ko-KR")
+            if text.strip(): self.on_text_recognized(text)
+        except Exception: pass
 
 # ==========================================
 # [메인] 실행 루프
@@ -321,8 +387,8 @@ async def main():
         audio_player = AsyncAudioPlayer()
 
         cap = cv2.VideoCapture(0)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
         shared_state = {
             "latest_frame": None, 
@@ -336,9 +402,18 @@ async def main():
         rag_engine = SupabaseRAG(client)
         rag_queue = asyncio.Queue()
 
+        # STT 콜백 (Firebase에 저장 + RAG 큐에 추가)
+        def on_user_speak(text):
+            print(f"\n[🗣️ User]: {text}")
+            logger.log_message('user', text)
+            rag_queue.put_nowait(text)
+
         def on_model_speak(text):
             print(f"[🤖 Gemini]: {text}")
             logger.log_message('gemini', text)
+
+        stt_user = SpeechTranscriber(sample_rate=INPUT_RATE, on_text_recognized=on_user_speak)
+        stt_model = SpeechTranscriber(sample_rate=OUTPUT_RATE, on_text_recognized=on_model_speak)
 
         print(f"\n🚀 모델({MODEL_ID}) 연결 중...")
 
@@ -383,40 +458,22 @@ async def main():
                             continue
 
                         await session.send_realtime_input(audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000"))
+                        stt_user.add_audio(data)
                     except Exception: break
 
+            # [Task 4] 응답 수신 (Model)
             async def receive():
-                model_response_text_buffer = ""
                 while shared_state["running"]:
                     try:
                         async for response in session.receive():
-                            # Part 1: Gemini를 통해 사용자 음성 인식 처리
-                            if event := response.speech_recognition_event:
-                                if event.text and not event.is_final:
-                                    print(f"\r[... User]: {event.text}", end="", flush=True)
-                                if event.text and event.is_final:
-                                    # 최종 인식된 텍스트로 RAG 검색 및 로깅 수행
-                                    print(f"\n[🗣️ User]: {event.text}")
-                                    logger.log_message('user', event.text)
-                                    rag_queue.put_nowait(event.text)
-
-                            # Part 2: 모델 응답 처리 (오디오 + 텍스트)
-                            if model_turn := (response.server_content and response.server_content.model_turn):
-                                for part in model_turn.parts:
-                                    if part.text:
-                                        model_response_text_buffer += part.text
+                            if response.server_content and response.server_content.model_turn:
+                                for part in response.server_content.model_turn.parts:
                                     if part.inline_data:
-                                        audio_player.add_audio(part.inline_data.data)
-
-                                # 모델의 응답이 끝나면, 전체 텍스트를 한 번에 로깅
-                                if model_turn.end_of_turn and model_response_text_buffer.strip():
-                                    on_model_speak(model_response_text_buffer)
-                                    model_response_text_buffer = ""
+                                        audio_data = part.inline_data.data
+                                        audio_player.add_audio(audio_data)
+                                        stt_model.add_audio(audio_data)
                     except Exception as e:
                         print(f"수신 종료: {e}")
-                        # 오류 발생 시, 버퍼에 남아있는 텍스트가 있으면 로깅
-                        if model_response_text_buffer.strip():
-                           on_model_speak(model_response_text_buffer)
                         break
 
             # [Task 5] RAG 검색 및 컨텍스트 주입
@@ -465,6 +522,8 @@ async def main():
         print(f"오류 발생: {e}")
         traceback.print_exc()
     finally:
+        if 'stt_user' in locals(): stt_user.stop()
+        if 'stt_model' in locals(): stt_model.stop()
         if 'audio_player' in locals(): audio_player.close()
         if 'input_stream' in locals(): input_stream.stop_stream(); input_stream.close()
         if 'p' in locals(): p.terminate()
