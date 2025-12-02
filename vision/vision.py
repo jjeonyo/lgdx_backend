@@ -297,7 +297,7 @@ def get_config():
             pass
 
     return {
-        "response_modalities": ["AUDIO", "TEXT"], 
+        "response_modalities": ["AUDIO"], 
         "speech_config": {
             "voice_config": {
                 "prebuilt_voice_config": {
@@ -409,7 +409,7 @@ async def main():
                                         audio_player.add_audio(part.inline_data.data)
 
                                 # 모델의 응답이 끝나면, 전체 텍스트를 한 번에 로깅
-                                if model_turn.end_of_turn and model_response_text_buffer.strip():
+                                if response.server_content.turn_complete and model_response_text_buffer.strip():
                                     on_model_speak(model_response_text_buffer)
                                     model_response_text_buffer = ""
                     except Exception as e:
