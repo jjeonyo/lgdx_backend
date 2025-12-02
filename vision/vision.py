@@ -233,6 +233,54 @@ class SupabaseRAG:
             print(f"❌ Supabase 검색 실패: {e}")
             return []
 
+async def perform_summarization(client, session_id):
+    """Firebase에서 대화를 가져와 요약하고 결과를 DB에 저장"""
+    print(f"\n🔔 [Command Received] 요약 요청을 받았습니다. (Session: {session_id})")
+    
+    try:
+        # 1. 대화 로그 가져오기
+        ref = db.reference(f'sessions/{session_id}/messages')
+        messages_data = ref.get() # 동기 호출 (데이터가 많지 않으므로 괜찮음)
+
+        if not messages_data:
+            print("   ⚠️ 대화 내용이 없습니다.")
+            return
+
+        # 2. 텍스트 변환
+        chat_context = ""
+        for key, msg in messages_data.items():
+            sender = msg.get('sender', 'unknown')
+            content = msg.get('content', '')
+            chat_context += f"[{sender}]: {content}\n"
+
+        # 3. Gemini에게 요약 요청 (가벼운 모델 사용)
+        prompt = f"""
+        아래는 가전제품 수리 AI와 사용자의 대화 로그입니다.
+        현재 사용자가 겪고 있는 '문제점'과 '증상'을 
+        기술적인 관점에서 명확하게 1문장으로 요약해 주세요.
+        
+        [대화 로그]
+        {chat_context}
+        """
+
+        # Gemini 호출
+        resp = await client.aio.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt
+        )
+        summary_text = resp.text.strip()
+        print(f"   📝 요약 완료: {summary_text}")
+
+        # 4. 결과 DB 저장 및 명령어 초기화
+        # summary 필드에 결과 저장
+        db.reference(f'sessions/{session_id}').update({
+            'summary': summary_text,
+            'command': None  # 명령 수행 완료 후 초기화 (중요)
+        })
+
+    except Exception as e:
+        print(f"   ❌ 요약 중 에러 발생: {e}")
+
 # ==========================================
 # [클래스] 비동기 오디오 플레이어
 # ==========================================
@@ -496,12 +544,33 @@ async def main():
                     
                     await asyncio.sleep(0.1)
 
+            # [Task 6] Flutter 명령 감지 루프 (추가된 부분)
+            async def command_watcher():
+                current_session_id = logger.session_ref.key
+                last_command = None
+                command_ref = db.reference(f'sessions/{current_session_id}/command')
+                
+                while shared_state["running"]:
+                    try:
+                        # polling 방식으로 1초마다 확인 (Listen보다 async 충돌 위험이 적음)
+                        command = command_ref.get()
+                        
+                        if command == "summarize":
+                            # 요약 로직 실행 (비동기)
+                            await perform_summarization(client, current_session_id)
+                        
+                        await asyncio.sleep(1.0) # 1초 대기
+                    except Exception as e:
+                        print(f"Command Watcher Error: {e}")
+                        await asyncio.sleep(1.0)
+
             tasks = [
                 asyncio.create_task(display_loop()),
                 asyncio.create_task(send_video()),
                 asyncio.create_task(send_audio()),
                 asyncio.create_task(receive()),
-                asyncio.create_task(rag_loop())
+                asyncio.create_task(rag_loop()),
+                asyncio.create_task(command_watcher()) # <--- 여기 추가
             ]
             
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
