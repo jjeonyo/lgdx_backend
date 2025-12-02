@@ -16,15 +16,15 @@ from firebase_admin import db
 ##################### 영상 생성 1초에 천원이니까 신중하게 돌릴 것 #######################
 # 1. 환경 설정 (.env 파일 로드)
 
-project_root = Path(__file__).resolve().parents[2]
+project_root = Path(__file__).resolve().parents[1]
 load_dotenv(project_root / ".env")
 API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Firebase 설정 (vision.py와 동일한 키 사용)
-FIREBASE_KEY_PATH = project_root / "flask/기능/실시간비전/firebase_key.json"
+FIREBASE_KEY_PATH = "/Users/harry/LG DX SCHOOL/lgdx_backend/vision/FirebaseAdmin.json"
 # Realtime Database URL도 vision.py와 동일해야 함 (환경변수나 상수로 관리 추천)
 # 여기서는 예시 URL 사용 (vision.py에서 수정한 URL로 변경 필요)
-FIREBASE_DB_URL = "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com/" 
+FIREBASE_DB_URL = "https://lgdx-6054d-default-rtdb.asia-southeast1.firebasedatabase.app/"
 
 if not API_KEY:
     print("❌ API 키가 없습니다. .env 파일을 확인하거나 코드를 수정하세요.")
@@ -128,7 +128,7 @@ def generate_solution_image(visual_prompt, output_filename="solution.png"):
     try:
         # Imagen 모델 호출
         response = client.models.generate_images(
-            model='imagen-3.0-generate-001',
+            model='imagen-4.0-generate-001',
             prompt=visual_prompt,
             config=types.GenerateImagesConfig(
                 number_of_images=1,
@@ -166,11 +166,11 @@ def generate_solution_video(visual_prompt, output_filename="solution.mp4"):
     print("🎥 비디오 생성 중... (시간이 소요될 수 있습니다)")
     try:
         operation = client.models.generate_videos(
-            model="veo-3.0-generate-preview-0123",
+            model="veo-3.0-generate-001",
             prompt=visual_prompt,
             config=types.GenerateVideosConfig(
                 aspect_ratio="9:16",
-                duration_seconds=5,
+                duration_seconds=4,
             )
         )
 

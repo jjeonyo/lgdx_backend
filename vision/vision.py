@@ -114,59 +114,51 @@ class FirebaseLogger:
         self._start_session()
 
     def _init_firebase(self):
-        # 이미 앱이 초기화되어 있는지 확인 (중복 초기화 방지)
         if not firebase_admin._apps:
             try:
+                # 키 파일 경로 확인 필수
                 if not os.path.exists(FIREBASE_KEY_PATH):
                     print(f"❌ 키 파일을 찾을 수 없습니다: {FIREBASE_KEY_PATH}")
-                    sys.exit(1)
+                    return # 또는 sys.exit(1)
                     
                 cred = credentials.Certificate(FIREBASE_KEY_PATH)
-                # Realtime Database는 databaseURL이 필수입니다.
                 firebase_admin.initialize_app(cred, {
                     'databaseURL': FIREBASE_DATABASE_URL
                 })
                 print(f"🔥 Firebase 연결 성공! ({FIREBASE_DATABASE_URL})")
             except Exception as e:
                 print(f"❌ Firebase 초기화 오류: {e}")
-                sys.exit(1)
 
     def _start_session(self):
         try:
-            # 'sessions' 노드 아래에 새 세션 생성 (push)
+            # sessions 노드 아래에 현재 시간으로 새로운 대화 세션 생성
             self.session_ref = db.reference('sessions').push()
             self.session_ref.set({
-                'start_time': int(time.time() * 1000),  # timestamp (ms)
-                'model_id': MODEL_ID,
+                'start_time': int(time.time() * 1000),
+                'model': MODEL_ID,
                 'status': 'active'
             })
-            print(f"📄 새 세션 ID: {self.session_ref.key}")
+            print(f"📄 Firebase 세션 시작: {self.session_ref.key}")
         except Exception as e:
             print(f"❌ 세션 생성 실패: {e}")
 
     def log_message(self, sender, text):
-        if not self.session_ref: return
+        """
+        sender: 'user' 또는 'gemini'
+        text: 대화 내용
+        """
+        if not self.session_ref or not text: return
         try:
-            # 해당 세션의 'messages' 리스트에 대화 추가
+            # 해당 세션의 messages 아래에 대화 추가
             self.session_ref.child('messages').push().set({
-                'sender': sender,      # 'user' or 'gemini'
+                'sender': sender,
                 'content': text,
-                'created_at': int(time.time() * 1000)
+                'timestamp': int(time.time() * 1000) # 정렬을 위한 타임스탬프
             })
+            # print(f"   [DB 저장 완료] {sender}: {text[:10]}...") 
         except Exception as e:
             print(f"⚠️ 로그 저장 실패: {e}")
 
-# ==========================================
-# [클래스] Supabase RAG Engine
-# ==========================================
-
-# ==========================================
-# [클래스] Supabase Hybrid RAG Engine (텍스트 + 벡터)
-# ==========================================
-
-# ==========================================
-# [수정됨] Supabase Hybrid RAG Engine
-# ==========================================
 class SupabaseRAG:
     def __init__(self, gemini_client):
         self.gemini_client = gemini_client
@@ -285,14 +277,32 @@ class AsyncAudioPlayer:
 # ==========================================
 # [설정] Config
 # ==========================================
+
+# ==========================================
+# [수정] Config 설정을 통한 '생각 과정' 숨기기
+# ==========================================
 def get_config():
     current_dir = pathlib.Path(__file__).parent.absolute()
     persona_path = current_dir / "persona/persona_세탁기수리법.txt"
     
-    system_instruction = "너는 도움이 되는 LG전자의 AI 어시스턴트야."
+    # [핵심 수정] 시스템 지침 강화
+    base_instruction = """
+    Role: 당신은 LG전자의 친절하고 전문적인 AI 홈 가전 어시스턴트입니다.
+    
+    [Critical Output Rules]
+    1. **No Internal Monologue**: 답변 생성 전이나 중간에 'Addressing...', 'Thinking...', 'Strategy:'와 같은 내부 추론 과정을 텍스트로 절대 출력하지 마십시오.
+    2. **Direct Response**: 사용자의 질문에 대한 '최종 답변'만 즉시 한국어로 말하십시오.
+    3. **Tone**: 친구에게 말하듯 부드럽고 정중한 구어체(해요체)를 사용하십시오.
+    4. **Language**: 무조건 한국어(Korean)로만 대답하십시오. 영어를 섞어 쓰지 마십시오.
+    """
+
+    system_instruction = base_instruction
+    
+    # 페르소나 파일이 있다면 내용을 읽어서 뒤에 붙임
     if persona_path.exists():
         try:
-            system_instruction = persona_path.read_text(encoding="utf-8")
+            file_content = persona_path.read_text(encoding="utf-8")
+            system_instruction += f"\n\n[Domain Knowledge]\n{file_content}"
         except Exception:
             pass
 
@@ -301,7 +311,7 @@ def get_config():
         "speech_config": {
             "voice_config": {
                 "prebuilt_voice_config": {
-                    "voice_name": "Kore" # 목소리 바꾸기
+                    "voice_name": "Kore"
                 }
             }
         },
@@ -321,8 +331,8 @@ async def main():
         audio_player = AsyncAudioPlayer()
 
         cap = cv2.VideoCapture(0)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1280)
 
         shared_state = {
             "latest_frame": None, 
@@ -363,7 +373,7 @@ async def main():
             async def send_video():
                 while shared_state["running"]:
                     if shared_state["latest_frame"] is not None:
-                        frame = cv2.resize(shared_state["latest_frame"], (640, 480))
+                        frame = cv2.resize(shared_state["latest_frame"], (480, 640))
                         _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
                         try:
                             await session.send_realtime_input(
@@ -385,46 +395,83 @@ async def main():
                         await session.send_realtime_input(audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000"))
                     except Exception: break
 
+            # [Task 4] 모델 응답 수신 및 처리 (내부 함수)
             async def receive():
-                model_response_text_buffer = ""
-                while shared_state["running"]:
-                    try:
-                        async for response in session.receive():
-                            # Part 1: Gemini를 통해 사용자 음성 인식 처리
-                            if event := response.speech_recognition_event:
-                                if event.text and not event.is_final:
-                                    print(f"\r[... User]: {event.text}", end="", flush=True)
-                                if event.text and event.is_final:
-                                    # 최종 인식된 텍스트로 RAG 검색 및 로깅 수행
-                                    print(f"\n[🗣️ User]: {event.text}")
-                                    logger.log_message('user', event.text)
-                                    rag_queue.put_nowait(event.text)
+                model_response_buffer = ""
+                last_user_text = ""
 
-                            # Part 2: 모델 응답 처리 (오디오 + 텍스트)
-                            if model_turn := (response.server_content and response.server_content.model_turn):
-                                for part in model_turn.parts:
-                                    if part.text:
-                                        model_response_text_buffer += part.text
-                                    if part.inline_data:
-                                        audio_player.add_audio(part.inline_data.data)
+                try:
+                    async for server_content in session.receive():
+                        # ① 사용자 음성 인식 결과 처리
+                        if transcription := server_content.input_transcription:
+                            if transcription.final:
+                                last_user_text = transcription.text.strip()
+                                if last_user_text:
+                                    logger.log_message("user", last_user_text)
+                                    # RAG 검색 큐에 추가 (원래 로직 복원)
+                                    rag_queue.put_nowait(last_user_text)
+                            else:
+                                # 중간 인식 결과 출력 (선택 사항)
+                                print(f"\r[... User]: {transcription.text}", end="", flush=True)
+                            continue
 
-                                # 모델의 응답이 끝나면, 전체 텍스트를 한 번에 로깅
-                                if response.server_content.turn_complete and model_response_text_buffer.strip():
-                                    on_model_speak(model_response_text_buffer)
-                                    model_response_text_buffer = ""
-                    except Exception as e:
-                        print(f"수신 종료: {e}")
-                        # 오류 발생 시, 버퍼에 남아있는 텍스트가 있으면 로깅
-                        if model_response_text_buffer.strip():
-                           on_model_speak(model_response_text_buffer)
-                        break
+                        # ② 모델 응답 처리
+                        if model_turn := server_content.model_turn:
+                            for part in model_turn.parts:
+                                # 🔥 (A) 오디오 스트림이 나온 경우 → 직전에 누적된 텍스트만 "최종 발화"로 저장
+                                if hasattr(part, "inline_data") and part.inline_data:
+                                    audio_player.add_audio(part.inline_data.data)
+                                    
+                                    clean_text = model_response_buffer.strip()
+                                    # 불필요한 reasoning 제거 및 로깅
+                                    if clean_text and clean_text != last_user_text:
+                                        # 간단한 필터링 후 저장
+                                        if not ("thinking" in clean_text.lower() or "what should i say" in clean_text.lower()):
+                                            logger.log_message("gemini", clean_text)
+                                            print(f"\n[🤖 Gemini]: {clean_text}")
+                                    
+                                    # 다음 발화를 위해 버퍼 초기화
+                                    model_response_buffer = ""
+                                    continue
+
+                                # 🔥 (B) 순수 텍스트 (여기에는 reasoning 포함됨) → DB 저장 금지, 버퍼에만 임시 저장
+                                if hasattr(part, "text") and part.text:
+                                    text = part.text.strip()
+
+                                    # 현실적인 방어 로직 — 사내 추론/시뮬레이션 대사 제거
+                                    if (
+                                        text == last_user_text                                 # 사용자 발화와 동일
+                                        or text.startswith("User:")                             # 시뮬레이션 사용자 대사
+                                        or text.startswith("Assistant:")                        # 시뮬레이션 모델 대사
+                                        or "what should i say" in text.lower()                  # reasoning 힌트
+                                        or "thinking" in text.lower()                           # chain-of-thought
+                                        or text.endswith("?") and "should" in text.lower()      # self-questioning
+                                    ):
+                                        continue
+
+                                    model_response_buffer += text
+                            continue
+
+                        # ③ 턴 종료 (turn_complete) — 안전하게 마무리
+                        if server_content.turn_complete:
+                            clean_text = model_response_buffer.strip()
+                            if clean_text and clean_text != last_user_text:
+                                if not ("thinking" in clean_text.lower() or "what should i say" in clean_text.lower()):
+                                    logger.log_message("gemini", clean_text)
+                                    print(f"\n[🤖 Gemini (Final)]: {clean_text}")
+                            model_response_buffer = ""
+
+                except Exception as e:
+                    print(f"수신 중단: {e}")
+                    # 에러로 끊겼을 때 버퍼에 남은 내용이 있다면 저장하고 종료
+                    if model_response_buffer.strip():
+                        logger.log_message('gemini', model_response_buffer)
 
             # [Task 5] RAG 검색 및 컨텍스트 주입
             async def rag_loop():
                 while shared_state["running"]:
                     try:
                         # 큐에서 텍스트 꺼내기 (없으면 대기하지 않고 넘어감 -> timeout)
-                        # wait for user input
                         try:
                             text = await asyncio.wait_for(rag_queue.get(), timeout=1.0)
                         except asyncio.TimeoutError:
@@ -439,8 +486,7 @@ async def main():
                             msg = f"참고 매뉴얼 정보 (User Question: {text}):\n{context_text}"
                             print(f"   ✅ 검색 성공 ({len(results)}건) -> 모델에 주입")
                             
-                            # 모델에게 텍스트로 정보 전달 (end_of_turn=False로 설정하여 답변 강제 트리거 방지)
-                            # 하지만 Live API에서는 텍스트를 보내면 모델이 읽고 반응할 수 있음
+                            # 모델에게 텍스트로 정보 전달
                             await session.send(input=msg, end_of_turn=False)
                         else:
                             print("   ⚠️ 검색 결과 없음")
