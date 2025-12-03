@@ -11,7 +11,7 @@ import time
 import sqlite3
 import firebase_admin
 from firebase_admin import credentials
-from firebase_admin import db
+from firebase_admin import firestore
 
 ##################### 영상 생성 1초에 천원이니까 신중하게 돌릴 것 #######################
 # 1. 환경 설정 (.env 파일 로드)
@@ -22,9 +22,6 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Firebase 설정 (vision.py와 동일한 키 사용)
 FIREBASE_KEY_PATH = "/Users/harry/LG DX SCHOOL/lgdx_backend/vision/FirebaseAdmin.json"
-# Realtime Database URL도 vision.py와 동일해야 함 (환경변수나 상수로 관리 추천)
-# 여기서는 예시 URL 사용 (vision.py에서 수정한 URL로 변경 필요)
-FIREBASE_DB_URL = "https://lgdx-6054d-default-rtdb.asia-southeast1.firebasedatabase.app/"
 
 if not API_KEY:
     print("❌ API 키가 없습니다. .env 파일을 확인하거나 코드를 수정하세요.")
@@ -38,47 +35,50 @@ def init_firebase():
     try:
         if not firebase_admin._apps:
             cred = credentials.Certificate(str(FIREBASE_KEY_PATH))
-            firebase_admin.initialize_app(cred, {
-                'databaseURL': FIREBASE_DB_URL
-            })
+            firebase_admin.initialize_app(cred)
             print("🔥 Firebase 연결 성공!")
     except Exception as e:
         print(f"❌ Firebase 초기화 오류: {e}")
 
 def get_latest_conversation_context():
     """
-    Firebase Realtime Database에서 가장 최근 세션의 대화 내용을 가져옵니다.
+    Firebase Firestore에서 가장 최근 세션의 대화 내용을 가져옵니다.
     """
     init_firebase()
     
     try:
-        # 1. 모든 세션 가져오기 (세션 ID가 타임스탬프이므로 정렬 가능)
-        sessions_ref = db.reference('sessions')
-        sessions = sessions_ref.order_by_key().limit_to_last(1).get()
+        db_client = firestore.client()
+        # 1. 가장 최근 세션 가져오기 (start_time 기준 내림차순)
+        sessions_ref = db_client.collection('sessions')
+        # start_time이 없는 문서가 있을 수 있으므로 쿼리 시 유의 (일반적으로는 문제없음)
+        query = sessions_ref.order_by('start_time', direction=firestore.Query.DESCENDING).limit(1)
+        docs = list(query.stream())
         
-        if not sessions:
+        if not docs:
             print("❌ 저장된 대화 세션이 없습니다.")
             return None
             
         # 최근 세션 ID와 데이터 추출
-        session_id = list(sessions.keys())[0]
-        session_data = sessions[session_id]
+        session_doc = docs[0]
+        session_id = session_doc.id
         
         print(f"📖 최근 대화 세션(ID: {session_id})을 불러옵니다...")
         
-        # 2. 해당 세션의 메시지 가져오기
-        if 'messages' not in session_data:
+        # 2. 해당 세션의 메시지 가져오기 (Subcollection)
+        messages_ref = session_doc.reference.collection('messages')
+        messages_docs = messages_ref.order_by('created_at').stream()
+        
+        messages_list = []
+        for m in messages_docs:
+            messages_list.append(m.to_dict())
+            
+        if not messages_list:
             print("❌ 이 세션에는 대화 내용이 없습니다.")
             return None
-            
-        messages_dict = session_data['messages']
-        
-        # 메시지 정렬 (push ID 기준, 시간순)
-        sorted_messages = sorted(messages_dict.items(), key=lambda x: x[0])
         
         # 3. 대화 내용 포맷팅
         conversation_text = ""
-        for msg_id, msg_data in sorted_messages:
+        for msg_data in messages_list:
             sender = msg_data.get('sender', 'unknown')
             content = msg_data.get('content', '')
             conversation_text += f"[{sender}]: {content}\n"

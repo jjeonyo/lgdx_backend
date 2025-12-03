@@ -75,3 +75,5 @@ frontend/
 Spring\ Boot/
 .FirebaseAdmin.json
 assets_generate/
+vision/FirebaseAdmin.json
+.serviceAccountKey.json

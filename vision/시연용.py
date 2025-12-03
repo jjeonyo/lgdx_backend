@@ -376,7 +376,7 @@ class AsyncAudioPlayer:
 # ==========================================
 def get_config():
     current_dir = pathlib.Path(__file__).parent.absolute()
-    persona_path = current_dir / "persona/persona_세탁법.txt"
+    persona_path = current_dir / "persona/persona_세탁기수리법.txt"
     
     system_instruction = "너는 도움이 되는 LG전자의 AI 어시스턴트야."
     if persona_path.exists():
@@ -611,44 +611,54 @@ async def main():
                         await session.send_realtime_input(audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000"))
                     except Exception: break
 
-# [Task 4] 응답 수신 (생각 프로세스 숨기기 적용)
             async def receive_response():
-                print("   👂 응답 대기 중...")
-                while shared_state["running"]:
+                # 1. 턴이 끝날 때까지 텍스트를 누적할 버퍼 변수 선언
+                full_text = "" 
+
+                while True:
                     try:
+                        # 세션에서 응답을 비동기적으로 받음
                         async for response in session.receive():
-                            server_content = response.server_content
-                            if server_content is None:
-                                continue
+                            if response.server_content:
+                                model_turn = response.server_content.model_turn
+                                if model_turn:
+                                    for part in model_turn.parts:
+                                        is_thought = getattr(part, "thought", False)
+                                        
+                                        # 인라인 데이터 처리 (오디오 등)
+                                        if part.inline_data:
+                                            audio_player.add_audio(part.inline_data.data)
+                                            
+                                        # 2. 텍스트 추출 및 누적
+                                        if part.text and not is_thought:
+                                            # 텍스트 조각을 화면에 실시간 출력 (한 번만 출력하도록 제어)
+                                            if not full_text:
+                                                print(f"\n[🤖 Gemini]: ", end="", flush=True)
+                                            
+                                            print(part.text, end="", flush=True) 
+                                            
+                                            # [핵심] 텍스트 버퍼에 조각난 텍스트 추가
+                                            full_text += part.text 
+                                            
+                                            # 기존 로거 로직
+                                            logger.append_text(part.text)
 
-                            model_turn = server_content.model_turn
-                            if model_turn:
-                                for part in model_turn.parts:
+                                # 3. 턴 종료(turn_complete) 신호 확인
+                                if getattr(response.server_content, "turn_complete", False):
+                                    # 턴 종료 시, 줄바꿈 처리
+                                    if full_text:
+                                        print("") # 줄바꿈
                                     
-                                    # [핵심 수정] "생각(Thought)" 데이터면 출력하지 않고 건너뜀
-                                    # google-genai 최신 버전에서는 part.thought 속성으로 구분 가능
-                                    if getattr(part, "thought", False):
-                                        continue
-
-                                    # 1. 오디오 데이터 처리
-                                    if part.inline_data:
-                                        audio_player.add_audio(part.inline_data.data)
-
-                                    # 2. 텍스트 데이터 처리 (생각이 아닌 실제 답변만 출력)
-                                    if part.text:
-                                        print(part.text, end="", flush=True)
-                                        logger.append_text(part.text)
-
-                            # 3. 턴 종료 신호 처리
-                            if server_content.turn_complete:
-                                print("\n") 
-                                logger.flush_model_turn()
+                                    # 완성된 텍스트를 가지고 원하는 후속 처리 수행 (예: DB 저장, 별도 로직 전달 등)
+                                    
+                                    logger.flush_model_turn()
+                                    
+                                    # [중요] 다음 턴을 위해 버퍼를 비워 초기화
+                                    full_text = ""
 
                     except Exception as e:
-                        print(f"⚠️ 응답 수신 루프 에러: {e}")
-                        await asyncio.sleep(1)
-
-
+                        print(f"응답 수신 중 오류 발생: {e}")
+                        break
             # [Task 5] RAG 검색 및 컨텍스트 주입
             async def rag_loop():
                 while shared_state["running"]:
