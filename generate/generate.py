@@ -103,7 +103,7 @@ def create_visual_prompt(conversation_context):
     [Conversation History]
     {conversation_context}
     
-    Based on this, create a high-quality, cinematic, and detailed English visual prompt for a video generation model (like OpenAI Sora or Google Veo).
+    Based on this, create a high-quality, cinematic, and detailed visual prompt for a video generation model (like OpenAI Sora or Google Veo).
     The video should depict the solution or the maintenance step clearly.
     Focus on realistic textures, lighting, and clear action.
     Output ONLY the prompt in English.
