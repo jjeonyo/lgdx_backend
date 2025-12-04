@@ -56,16 +56,22 @@ print(f"🚀 AI 모델 로드 완료: {GENERATION_MODEL_ID}")
 
 def save_to_firebase(user_id: str, sender: str, text: str, msg_type: str = "TEXT"):
     try:
-        doc_ref = db.collection("chat_rooms").document(f"room_{user_id}").collection("messages")
-        doc_ref.add({
+        room_id = f"room_{user_id}"
+        doc_ref = db.collection("chat_rooms").document(room_id).collection("messages")
+        message_data = {
             "sender": sender,
             "text": text,
-            "message_type": msg_type,
+            "content": text,  # vision/test.py와 통일을 위해 content 필드도 추가
+            "message_type": "chat_bot",  # 메시지 타입: 'chat_bot' (텍스트 챗봇)
             "timestamp": firestore.SERVER_TIMESTAMP
-        })
-        print(f"💾 [Firebase] {sender}: {text[:10]}...")
+        }
+        doc_ref.add(message_data)
+        print(f"💾 [Firebase] 저장 완료 - room: {room_id}, sender: {sender}, text: {text[:30]}...")
+        print(f"💾 [Firebase] 저장된 데이터: {message_data}")
     except Exception as e:
-        print(f"⚠️ Firebase 저장 실패: {e}")
+        print(f"❌ [Firebase] 저장 실패: {e}")
+        import traceback
+        traceback.print_exc()
 
 def get_embedding(text: str):
     try:
@@ -113,11 +119,12 @@ class ChatResponse(BaseModel):
 # -------------------------------------------------------
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest):
-    print(f"📩 [요청 도착] ID: {req.user_id}, 내용: {req.user_message}")
+    print(f"📩 [Python] 요청 도착 - userId: {req.user_id}, message: {req.user_message}")
     
     try:
         # 1. 사용자 질문 저장
-        save_to_firebase(req.user_id, "user", req.user_message, "user")  # message_type을 sender와 동일하게
+        print(f"💾 [Python] 사용자 메시지 Firebase 저장 시작...")
+        save_to_firebase(req.user_id, "user", req.user_message)
 
         # 2. 쿼리 확장 (키워드 검색용)
         search_keyword = optimize_search_query(req.user_message)
@@ -159,7 +166,7 @@ async def chat_endpoint(req: ChatRequest):
             당신은 LG전자 가전제품 전문 상담원 'ThinQ 봇'입니다.
             사용자의 질문에 대해 아래 제공된 [매뉴얼 데이터]를 기반으로 친절하고 정확하게 답변해 주세요.
             세탁방법에 대해 물었는데 메뉴얼에 없다면 다른 특정 세탁기의 기능은 말하지 말고 특정 세탁기가 없어도 누구나 적용가능한 방법을 너가 알고 있는 최대한 정확한 지식으로 친절하게 답변해줘
-            
+            메뉴얼에 없는 내용은 메뉴얼에 없는 내용이라고 말하지말고 자연스럽게 너가 알고 있는 지식으로 친절하게 답변해줘
             [지침]
             1. 표 내용은 문장으로 자연스럽게 풀어서 설명하세요.
             2. 답변 끝에는 참고한 페이지 번호나 섹션을 언급해주세요.
@@ -180,8 +187,9 @@ async def chat_endpoint(req: ChatRequest):
             final_answer = gen_resp.text
 
         # 7. 답변 저장
-        save_to_firebase(req.user_id, "ai", final_answer, "ai")  # message_type을 sender와 동일하게
-        print(f"✅ [답변 완료] {final_answer[:30]}...")
+        print(f"💾 [Python] AI 답변 Firebase 저장 시작...")
+        save_to_firebase(req.user_id, "ai", final_answer)
+        print(f"✅ [Python] 답변 완료 및 저장 완료: {final_answer[:30]}...")
 
         return ChatResponse(
             answer=final_answer,
