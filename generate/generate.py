@@ -21,7 +21,7 @@ load_dotenv(project_root / ".env")
 API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Firebase 설정 (vision.py와 동일한 키 사용)
-FIREBASE_KEY_PATH = "/Users/harry/LG DX SCHOOL/lgdx_backend/vision/FirebaseAdmin.json"
+FIREBASE_KEY_PATH = project_root / "vision/serviceAccountKey.json"
 
 if not API_KEY:
     print("❌ API 키가 없습니다. .env 파일을 확인하거나 코드를 수정하세요.")
