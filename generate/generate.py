@@ -21,7 +21,13 @@ load_dotenv(project_root / ".env")
 API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Firebase 설정 (vision.py와 동일한 키 사용)
-FIREBASE_KEY_PATH = project_root / "vision/serviceAccountKey.json"
+# serviceAccountKey.json은 프로젝트 루트에 위치함
+FIREBASE_KEY_PATH = project_root / "serviceAccountKey.json"
+
+if not FIREBASE_KEY_PATH.exists():
+    print(f"⚠️ 경고: 키 파일을 찾을 수 없습니다: {FIREBASE_KEY_PATH}")
+    # Fallback: 하드코딩된 경로 시도 (필요 시)
+    FIREBASE_KEY_PATH = Path("/Users/harry/LG DX SCHOOL/lgdx_backend/serviceAccountKey.json")
 
 if not API_KEY:
     print("❌ API 키가 없습니다. .env 파일을 확인하거나 코드를 수정하세요.")
@@ -89,7 +95,7 @@ def get_latest_conversation_context():
         print(f"❌ Firebase 읽기 오류: {e}")
         return None
 
-# 2. [1단계: 작가 AI] 문제 상황을 시각적 묘사로 변환
+
 def create_visual_prompt(conversation_context):
     """
     대화 내용을 바탕으로 영상 생성용 프롬프트(영어)를 작성합니다.
@@ -103,7 +109,7 @@ def create_visual_prompt(conversation_context):
     [Conversation History]
     {conversation_context}
     
-    Based on this, create a high-quality, cinematic, and detailed visual prompt for a video generation model (like OpenAI Sora or Google Veo).
+    Based on this, create a high-quality, cinematic, and detailed English visual prompt for a video generation model (like OpenAI Sora or Google Veo).
     The video should depict the solution or the maintenance step clearly.
     Focus on realistic textures, lighting, and clear action.
     Output ONLY the prompt in English.
@@ -118,59 +124,16 @@ def create_visual_prompt(conversation_context):
     print(f"📝 생성된 묘사(Prompt): {visual_prompt}")
     return visual_prompt
 
-# 3. [2단계: 화가 AI] 이미지 생성 (Imagen 3)
-def generate_solution_image(visual_prompt, output_filename="solution.png"):
-    """
-    프롬프트를 받아 실제 이미지를 생성하고 저장합니다.
-    """
-    print("🎨 이미지 그리는 중... (약 5~10초 소요)")
-    
-    try:
-        # Imagen 모델 호출
-        response = client.models.generate_images(
-            model='imagen-4.0-generate-001',
-            prompt=visual_prompt,
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-                aspect_ratio="9:16",
-                person_generation="allow_adult" # 손이나 사람이 나와야 하므로 허용
-            )
-        )
-
-        # 이미지 저장
-        if response.generated_images:
-            image_data = response.generated_images[0].image
-            image = Image.open(io.BytesIO(image_data.image_bytes))
-            image.save(output_filename)
-            print(f"✅ 해결책 이미지가 저장되었습니다: {output_filename}")
-            
-            # (선택) 바로 이미지 띄우기
-            # image.show()
-            return output_filename
-        else:
-            print("❌ 이미지가 생성되지 않았습니다.")
-            return None
-
-    except Exception as e:
-        print(f"❌ 이미지 생성 오류: {str(e)}")
-        if "403" in str(e):
-            print("Tip: 사용 중인 프로젝트가 Imagen API 사용 권한이 있는지 확인하세요.")
-        return None
-
-# 4. [보너스: 비디오 생성] (Veo 모델 접근 권한 필요)
-# 현재 대부분의 계정에서 Imagen(이미지)은 되지만 Veo(영상)는 웨이트리스트인 경우가 많습니다.
-# 권한이 있다고 가정했을 때의 코드 구조입니다.
-
 
 def generate_solution_video(visual_prompt, output_filename="solution.mp4"):
     print("🎥 비디오 생성 중... (시간이 소요될 수 있습니다)")
     try:
         operation = client.models.generate_videos(
-            model="veo-3.0-generate-001",
+            model="veo-3.1-fast-generate-preview",
             prompt=visual_prompt,
             config=types.GenerateVideosConfig(
-                aspect_ratio="9:16",
-                duration_seconds=4,
+                aspect_ratio="16:9",
+                duration_seconds=8,
             )
         )
 
@@ -196,14 +159,14 @@ def generate_solution_video(visual_prompt, output_filename="solution.mp4"):
 # === 메인실행부 ===
 if __name__ == "__main__":
     # 사용자 시나리오 테스트
-    print("--- 🛠️ AI 해결책 생성기 (First 기능) ---")
+    print("--- 🛠️ AI 해결책 생성기 ---")
     
     # 1. 대화 내용 가져오기
     conversation_context = get_latest_conversation_context()
     
     if not conversation_context:
         print("대화 내용을 불러오지 못해 기본 예제로 진행합니다.")
-        conversation_context = "User: 세탁기 배수가 안돼요. 어떻게 해야 하나요?"
+        conversation_context = "사용자는 세탁기 배수가 되지 않는 문제를 겪고 있음"
 
     # 2. 묘사 생성
     prompt = create_visual_prompt(conversation_context)
@@ -217,10 +180,6 @@ if __name__ == "__main__":
         
         # 파일명 생성 (타임스탬프 포함하여 중복 방지)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # 이미지 생성
-        output_filename = output_dir / f"result_solution_{timestamp}.png"
-        generate_solution_image(prompt, str(output_filename))
 
         # 영상 생성
         video_filename = output_dir / f"result_solution_{timestamp}.mp4"

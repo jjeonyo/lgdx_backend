@@ -40,7 +40,49 @@ except ImportError:
 warnings.filterwarnings("ignore")
 
 # ==========================================
-# [설정] 환경 변수
+# .env 파일 로드 (프로젝트 루트에서 찾기)
+# ==========================================
+def load_environment():
+    try:
+        # 프로젝트 루트 경로 찾기
+        project_root = pathlib.Path(__file__).parent.parent.absolute()
+        env_path = project_root / ".env"
+        
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path)
+            print(f"✅ .env 파일 로드 완료: {env_path}")
+        else:
+            print(f"⚠️ .env 파일을 찾을 수 없습니다: {env_path}")
+    except Exception as e:
+        print(f"⚠️ .env 파일 로드 중 오류: {e}")
+
+load_environment()
+
+# ==========================================
+API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Firebase 키 경로 설정 (환경변수 우선, 없으면 현재 디렉토리의 FirebaseAdmin.json 사용)
+project_root = pathlib.Path(__file__).parent.parent.absolute()
+current_dir = pathlib.Path(__file__).parent.absolute()
+
+# 우선순위 1: 환경변수
+# 우선순위 2: vision 폴더 내 FirebaseAdmin.json
+# 우선순위 3: 프로젝트 루트의 serviceAccountKey.json
+default_key_path = "/Users/harry/LG DX SCHOOL/lgdx_backend/serviceAccountKey.json"
+#FIREBASE_KEY_PATH = os.getenv("FIREBASE_KEY_PATH", str(default_key_path))
+
+# Realtime Database URL (Firestore 사용 시 불필요하지만 참고용으로 남김/삭제 가능)
+FIREBASE_DATABASE_URL = "https://team-dxproject-default-rtdb.asia-southeast1.firebasedatabase.app/"
+
+MODEL_ID = "gemini-2.5-flash-native-audio-preview-09-2025"
+
+# [오디오 설정]
+AUDIO_FORMAT = pyaudio.paInt16
+CHANNELS = 1
+INPUT_RATE = 16000
+OUTPUT_RATE = 24000
+CHUNK_SIZE = 512
+
 # ==========================================
 
 def load_environment():
