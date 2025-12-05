@@ -91,7 +91,7 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 # Firebase 키 경로 설정 로직 개선
 project_root = pathlib.Path(__file__).parent.parent.absolute()
 default_firebase_path = project_root / "serviceAccountKey.json"
-FIREBASE_KEY_PATH = '/Users/harry/LG DX SCHOOL/lgdx_backend/vision/serviceAccountKey.json'
+FIREBASE_KEY_PATH = '/Users/harry/LG DX SCHOOL/lgdx_backend/vision/FirebaseAdmin.json'
 
 if not API_KEY:
     print("❌ GEMINI_API_KEY가 없습니다. .env 파일을 확인해주세요.")
