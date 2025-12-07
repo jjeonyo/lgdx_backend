@@ -22,7 +22,7 @@ import asyncio
 # [Firebase 라이브러리 추가]
 try:
     import firebase_admin
-    from firebase_admin import credentials, firestore  # pyright: ignore[reportMissingImports]
+    from firebase_admin import credentials, db  # pyright: ignore[reportMissingImports]
 except ImportError:
     print("❌ firebase-admin이 설치되지 않았습니다. 'pip install firebase-admin'을 실행하세요.")
     sys.exit(1)
@@ -57,8 +57,8 @@ current_dir = pathlib.Path(__file__).parent.absolute()
 default_key_path = current_dir / "FirebaseAdmin.json"
 FIREBASE_KEY_PATH = os.getenv("FIREBASE_KEY_PATH", str(default_key_path))
 
-# Realtime Database URL (Firestore 사용 시 불필요하지만 참고용으로 남김/삭제 가능)
-# FIREBASE_DATABASE_URL = "https://lgdx-6054d-default-rtdb.asia-southeast1.firebasedatabase.app/"
+# Realtime Database URL
+FIREBASE_DATABASE_URL = "https://lgdx-6054d-default-rtdb.asia-southeast1.firebasedatabase.app/"
 
 MODEL_ID = "gemini-2.5-flash-native-audio-preview-09-2025"
 
@@ -120,24 +120,17 @@ async def perform_summarization(client, session_id):
     print(f"\n🔔 [Command Received] 요약 요청을 받았습니다. (Session: {session_id})")
     
     try:
-        db_client = firestore.client()
         # 1. 대화 로그 가져오기
-        # Firestore: sessions/{session_id}/messages 컬렉션 조회
-        messages_ref = db_client.collection('sessions').document(session_id).collection('messages')
-        # created_at 기준 정렬
-        docs = messages_ref.order_by('created_at').stream()
-        
-        messages_list = []
-        for doc in docs:
-            messages_list.append(doc.to_dict())
+        ref = db.reference(f'sessions/{session_id}/messages')
+        messages_data = ref.get() # 동기 호출 (데이터가 많지 않으므로 괜찮음)
 
-        if not messages_list:
+        if not messages_data:
             print("   ⚠️ 대화 내용이 없습니다.")
             return
 
         # 2. 텍스트 변환
         chat_context = ""
-        for msg in messages_list:
+        for key, msg in messages_data.items():
             sender = msg.get('sender', 'unknown')
             content = msg.get('content', '')
             chat_context += f"[{sender}]: {content}\n"
@@ -154,7 +147,7 @@ async def perform_summarization(client, session_id):
 
         # Gemini 호출
         resp = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",
             contents=prompt
         )
         summary_text = resp.text.strip()
@@ -162,7 +155,7 @@ async def perform_summarization(client, session_id):
 
         # 4. 결과 DB 저장 및 명령어 초기화
         # summary 필드에 결과 저장
-        db_client.collection('sessions').document(session_id).update({
+        db.reference(f'sessions/{session_id}').update({
             'summary': summary_text,
             'command': None  # 명령 수행 완료 후 초기화 (중요)
         })
@@ -173,13 +166,12 @@ async def perform_summarization(client, session_id):
 
 
 # ==========================================
-# [클래스] Firebase Logger (Firestore 사용)
+# [클래스] Firebase Logger (Realtime Database 사용)
 # ==========================================
 class FirebaseLogger:
     def __init__(self):
         self.session_ref = None
         self.current_turn_text = ""
-        self.db = None
         self._init_firebase()
         self._start_session()
 
@@ -192,31 +184,33 @@ class FirebaseLogger:
                     sys.exit(1)
                     
                 cred = credentials.Certificate(FIREBASE_KEY_PATH)
-                firebase_admin.initialize_app(cred)
-                print(f"🔥 Firebase 연결 성공!")
+                # Realtime Database는 databaseURL이 필수입니다.
+                firebase_admin.initialize_app(cred, {
+                    'databaseURL': FIREBASE_DATABASE_URL
+                })
+                print(f"🔥 Firebase 연결 성공! ({FIREBASE_DATABASE_URL})")
             except Exception as e:
                 print(f"❌ Firebase 초기화 오류: {e}")
                 sys.exit(1)
-        
-        self.db = firestore.client()
 
     def _start_session(self):
         try:
-            # 'sessions' 컬렉션에 새 세션 생성 (add)
-            update_time, self.session_ref = self.db.collection('sessions').add({
+            # 'sessions' 노드 아래에 새 세션 생성 (push)
+            self.session_ref = db.reference('sessions').push()
+            self.session_ref.set({
                 'start_time': int(time.time() * 1000),  # timestamp (ms)
                 'model_id': MODEL_ID,
                 'status': 'active'
             })
-            print(f"📄 새 세션 ID: {self.session_ref.id}")
+            print(f"📄 새 세션 ID: {self.session_ref.key}")
         except Exception as e:
             print(f"❌ 세션 생성 실패: {e}")
 
     def log_message(self, sender, text):
         if not self.session_ref: return
         try:
-            # 해당 세션의 'messages' 컬렉션에 대화 추가
-            self.session_ref.collection('messages').add({
+            # 해당 세션의 'messages' 리스트에 대화 추가
+            self.session_ref.child('messages').push().set({
                 'sender': sender,      # 'user' or 'gemini'
                 'content': text,
                 'created_at': int(time.time() * 1000)
@@ -376,7 +370,7 @@ class AsyncAudioPlayer:
 # ==========================================
 def get_config():
     current_dir = pathlib.Path(__file__).parent.absolute()
-    persona_path = current_dir / "persona/persona_세탁법.txt"
+    persona_path = current_dir / "persona/persona_세탁기수리법.txt"
     
     system_instruction = "너는 도움이 되는 LG전자의 AI 어시스턴트야."
     if persona_path.exists():
@@ -611,44 +605,54 @@ async def main():
                         await session.send_realtime_input(audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000"))
                     except Exception: break
 
-# [Task 4] 응답 수신 (생각 프로세스 숨기기 적용)
             async def receive_response():
-                print("   👂 응답 대기 중...")
-                while shared_state["running"]:
+                # 1. 턴이 끝날 때까지 텍스트를 누적할 버퍼 변수 선언
+                full_text = "" 
+
+                while True:
                     try:
+                        # 세션에서 응답을 비동기적으로 받음
                         async for response in session.receive():
-                            server_content = response.server_content
-                            if server_content is None:
-                                continue
+                            if response.server_content:
+                                model_turn = response.server_content.model_turn
+                                if model_turn:
+                                    for part in model_turn.parts:
+                                        is_thought = getattr(part, "thought", False)
+                                        
+                                        # 인라인 데이터 처리 (오디오 등)
+                                        if part.inline_data:
+                                            audio_player.add_audio(part.inline_data.data)
+                                            
+                                        # 2. 텍스트 추출 및 누적
+                                        if part.text and not is_thought:
+                                            # 텍스트 조각을 화면에 실시간 출력 (한 번만 출력하도록 제어)
+                                            if not full_text:
+                                                print(f"\n[🤖 Gemini]: ", end="", flush=True)
+                                            
+                                            print(part.text, end="", flush=True) 
+                                            
+                                            # [핵심] 텍스트 버퍼에 조각난 텍스트 추가
+                                            full_text += part.text 
+                                            
+                                            # 기존 로거 로직
+                                            logger.append_text(part.text)
 
-                            model_turn = server_content.model_turn
-                            if model_turn:
-                                for part in model_turn.parts:
+                                # 3. 턴 종료(turn_complete) 신호 확인
+                                if getattr(response.server_content, "turn_complete", False):
+                                    # 턴 종료 시, 줄바꿈 처리
+                                    if full_text:
+                                        print("") # 줄바꿈
                                     
-                                    # [핵심 수정] "생각(Thought)" 데이터면 출력하지 않고 건너뜀
-                                    # google-genai 최신 버전에서는 part.thought 속성으로 구분 가능
-                                    if getattr(part, "thought", False):
-                                        continue
-
-                                    # 1. 오디오 데이터 처리
-                                    if part.inline_data:
-                                        audio_player.add_audio(part.inline_data.data)
-
-                                    # 2. 텍스트 데이터 처리 (생각이 아닌 실제 답변만 출력)
-                                    if part.text:
-                                        print(part.text, end="", flush=True)
-                                        logger.append_text(part.text)
-
-                            # 3. 턴 종료 신호 처리
-                            if server_content.turn_complete:
-                                print("\n") 
-                                logger.flush_model_turn()
+                                    # 완성된 텍스트를 가지고 원하는 후속 처리 수행 (예: DB 저장, 별도 로직 전달 등)
+                                    
+                                    logger.flush_model_turn()
+                                    
+                                    # [중요] 다음 턴을 위해 버퍼를 비워 초기화
+                                    full_text = ""
 
                     except Exception as e:
-                        print(f"⚠️ 응답 수신 루프 에러: {e}")
-                        await asyncio.sleep(1)
-
-
+                        print(f"응답 수신 중 오류 발생: {e}")
+                        break
             # [Task 5] RAG 검색 및 컨텍스트 주입
             async def rag_loop():
                 while shared_state["running"]:
@@ -682,21 +686,14 @@ async def main():
 
             # [Task 6] Command Watcher
             async def command_watcher():
-                if not logger.session_ref:
-                    return
-
-                current_session_id = logger.session_ref.id
-                # Firestore 참조
-                db_client = firestore.client()
-                session_doc_ref = db_client.collection('sessions').document(current_session_id)
+                current_session_id = logger.session_ref.key
+                last_command = None
+                command_ref = db.reference(f'sessions/{current_session_id}/command')
                 
                 while shared_state["running"]:
                     try:
                         # polling 방식으로 1초마다 확인 (Listen보다 async 충돌 위험이 적음)
-                        doc = session_doc_ref.get()
-                        command = None
-                        if doc.exists:
-                            command = doc.to_dict().get('command')
+                        command = command_ref.get()
                         
                         if command == "summarize":
                             # 요약 로직 실행 (비동기)

@@ -374,6 +374,42 @@ async def check_video_status():
         print(f"Check status error: {e}")
         return {"status": "processing"}
 
+# -------------------------------------------------------
+# [API 2] 채팅 내역 불러오기 (History)
+# -------------------------------------------------------
+@app.get("/chat/history")
+async def get_chat_history(user_id: str):
+    """
+    특정 사용자(user_id)의 채팅 내역을 시간순으로 가져옵니다.
+    """
+    try:
+        room_id = f"room_{user_id}"
+        print(f"📂 [History] Fetching history for {room_id}")
+
+        # Firestore 쿼리 (timestamp 오름차순)
+        docs = db.collection("chat_rooms").document(room_id).collection("messages")\
+            .order_by("timestamp").stream()
+
+        messages = []
+        for doc in docs:
+            data = doc.to_dict()
+            
+            # Timestamp 처리 (JSON 직렬화를 위해 문자열 변환)
+            if "timestamp" in data and data["timestamp"]:
+                # Datetime 객체인 경우
+                if hasattr(data["timestamp"], "isoformat"):
+                    data["timestamp"] = data["timestamp"].isoformat()
+                else:
+                    data["timestamp"] = str(data["timestamp"])
+            
+            messages.append(data)
+
+        return {"messages": messages}
+
+    except Exception as e:
+        print(f"❌ History Error: {e}")
+        return {"messages": []}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

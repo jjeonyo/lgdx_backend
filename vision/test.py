@@ -4,6 +4,7 @@ import cv2
 import pathlib
 import sys
 import time
+from datetime import datetime
 import pyaudio
 import warnings
 import traceback
@@ -234,17 +235,6 @@ class FirebaseLogger:
             self.log_message('gemini', self.current_turn_text)
             self.current_turn_text = ""
 
-    def append_text(self, text):
-        """스트리밍되는 텍스트 조각을 임시 버퍼에 추가"""
-        self.current_turn_text += text
-
-    def flush_model_turn(self):
-        """버퍼에 모인 텍스트를 한 번에 로그로 저장하고 초기화"""
-        if self.current_turn_text.strip():
-            self.log_message('gemini', self.current_turn_text)
-            self.current_turn_text = ""
-
-
 # ==========================================
 # [클래스] Supabase RAG Engine
 # ==========================================
@@ -396,8 +386,6 @@ def get_config():
         },
         "system_instruction": system_instruction
     }
-
-
 # ==========================================
 # [API 설정] FastAPI & Chat Endpoint
 # ==========================================
@@ -565,7 +553,6 @@ async def main():
         def on_model_speak(text):
             print(f"[🤖 Gemini]: {text}")
             logger.log_message('gemini', text)
-
         print(f"\n🚀 모델({MODEL_ID}) 연결 중...")
 
         async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
