@@ -12,4 +12,7 @@ public class PythonRequest {
 
     @JsonProperty("user_message")
     private String userMessage;
+    
+    @JsonProperty("session_id")
+    private String sessionId; // room_id (예: room_user_001, room_user_002)
 }
