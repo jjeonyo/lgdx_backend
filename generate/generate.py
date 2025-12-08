@@ -18,13 +18,13 @@ from firebase_admin import firestore
 
 project_root = Path(__file__).resolve().parents[1]
 load_dotenv(project_root / ".env")
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("google_api")
 
 # Firebase 설정 (vision.py와 동일한 키 사용)
 FIREBASE_KEY_PATH = project_root / "vision/serviceAccountKey.json"
 
 if not API_KEY:
-    print("❌ API 키가 없습니다. .env 파일을 확인하거나 코드를 수정하세요.")
+    print("❌ google_api가 없습니다. .env 파일을 확인하거나 코드를 수정하세요.")
     exit()
 
 # 클라이언트 초기화

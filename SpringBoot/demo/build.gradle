@@ -37,6 +37,8 @@ dependencies {
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 	// 🔥 파이어베이스 연동 도구 (이거 추가!)
     implementation 'com.google.firebase:firebase-admin:9.2.0'
+	// 🔥 .env 파일 지원 라이브러리
+	implementation 'me.paulschwarz:spring-dotenv:2.5.3'
 }
 
 tasks.named('test') {

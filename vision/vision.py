@@ -45,7 +45,7 @@ except ImportError:
 warnings.filterwarnings("ignore")
 
 # ==========================================
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("google_api")
 
 # Firebase 키 경로 설정 (환경변수 우선, 없으면 현재 디렉토리의 FirebaseAdmin.json 사용)
 project_root = pathlib.Path(__file__).parent.parent.absolute()
@@ -86,7 +86,7 @@ def load_environment():
 
 load_environment()
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("google_api")
 
 # Firebase 키 경로 설정 로직 개선
 project_root = pathlib.Path(__file__).parent.parent.absolute()
@@ -94,7 +94,7 @@ default_firebase_path = project_root / "serviceAccountKey.json"
 FIREBASE_KEY_PATH = '/Users/harry/LG DX SCHOOL/lgdx_backend/vision/FirebaseAdmin.json'
 
 if not API_KEY:
-    print("❌ GEMINI_API_KEY가 없습니다. .env 파일을 확인해주세요.")
+    print("❌ google_api가 없습니다. .env 파일을 확인해주세요.")
     sys.exit(1)
 
 if not FIREBASE_KEY_PATH:

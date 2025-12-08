@@ -20,20 +20,18 @@ import json
 import asyncio
 
 
-# [추가] RAG & Supabase 관련
+# [Firebase 라이브러리 추가]
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore  # pyright: ignore[reportMissingImports]
 except ImportError:
-    print("❌ supabase 또는 google-generativeai 라이브러리가 없습니다.")
-    print("   pip install supabase google-generativeai")
+    print("❌ firebase-admin이 설치되지 않았습니다. 'pip install firebase-admin'을 실행하세요.")
     sys.exit(1)
 
-
-# [수정] google.genai에서 types 임포트
+# [Gemini 라이브러리]
 try:
     from google import genai
-    from google.genai import types
+    from google.genai import types  # pyright: ignore[reportMissingImports]
 except ImportError:
     print("❌ google-genai 라이브러리가 설치되지 않았습니다.")
     sys.exit(1)
@@ -45,7 +43,6 @@ except ImportError:
     print("❌ supabase 라이브러리가 설치되지 않았습니다. 'pip install supabase'를 실행하세요.")
     sys.exit(1)
 
-# [설정] 경고 메시지 숨기기
 warnings.filterwarnings("ignore")
 
 # ==========================================
@@ -83,13 +80,11 @@ if not API_KEY:
     print("❌ google_api가 없습니다. .env 파일을 확인해주세요.")
     sys.exit(1)
 
-# RAG용 추가 키
-SUPABASE_URL = "https://wzafalbctqkylhyzlfej.supabase.co"
-SUPABASE_KEY = os.getenv("supbase_service_role") or os.getenv("SUPABASE_SERVICE_ROLE")
-
-if not SUPABASE_KEY:
-    print("⚠️ Supabase 키가 없습니다. RAG 기능이 제한될 수 있습니다.")
-
+if not FIREBASE_KEY_PATH:
+    print(f"❌ Firebase 키 파일을 찾을 수 없습니다.")
+    print(f"   검색 위치 1: {current_dir / 'FirebaseAdmin.json'}")
+    print(f"   검색 위치 2: {project_root / 'Firebase.json'}")
+    sys.exit(1)
 
 
 
@@ -380,44 +375,59 @@ class SupabaseRAG:
             return []
 
 # ==========================================
-# [함수] 설정 및 페르소나 로드
+# [클래스] 비동기 오디오 플레이어
 # ==========================================
+class AsyncAudioPlayer:
+    def __init__(self):
+        self.queue = queue.Queue()
+        self.p = pyaudio.PyAudio()
+        self.stream = self.p.open(
+            format=AUDIO_FORMAT,
+            channels=CHANNELS,
+            rate=OUTPUT_RATE,
+            output=True
+        )
+        self.running = True
+        self.is_playing = False
+        self.thread = threading.Thread(target=self._play_loop, daemon=True)
+        self.thread.start()
 
+    def _play_loop(self):
+        while self.running:
+            try:
+                data = self.queue.get(timeout=0.05)
+                self.is_playing = True
+                self.stream.write(data)
+            except queue.Empty:
+                self.is_playing = False
+                continue
+            except Exception:
+                pass
+
+    def add_audio(self, data):
+        self.queue.put(data)
+
+    def close(self):
+        self.running = False
+        if self.thread.is_alive():
+            self.thread.join()
+        self.stream.stop_stream()
+        self.stream.close()
+        self.p.terminate()
+
+# ==========================================
+# [설정] Config
+# ==========================================
 def get_config():
     current_dir = pathlib.Path(__file__).parent.absolute()
     persona_path = current_dir / "persona/persona_세탁기사용법.txt"
     
-    system_instruction = ""
+    system_instruction = "너는 도움이 되는 LG전자의 AI 어시스턴트야."
     if persona_path.exists():
         try:
             system_instruction = persona_path.read_text(encoding="utf-8")
-            print(f"🎭 페르소나 로드됨: {persona_path.name}")
         except Exception:
             pass
-    else:
-        system_instruction = "너는 도움이 되는 AI 어시스턴트야. 실시간으로 대화해."
-
-    # 툴 정의 (매뉴얼 검색)
-    tools = [
-        {
-            "function_declarations": [
-                {
-                    "name": "search_manual",
-                    "description": "LG 전자 제품 매뉴얼에서 문제 해결 방법, 에러 코드, 사용법 등을 검색합니다. 사용자가 기술적인 질문을 하거나 도움이 필요할 때 사용하세요.",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "query": {
-                                "type": "STRING",
-                                "description": "검색할 질문 내용 (예: 'OE 에러 해결법', '세탁기 청소 방법')"
-                            }
-                        },
-                        "required": ["query"]
-                    }
-                }
-            ]
-        }
-    ]
 
     return {
         "response_modalities": ["AUDIO"],  # 오디오만 받기 (텍스트는 output_audio_transcription에서 추출)
@@ -1002,6 +1012,10 @@ async def main():
         rag_engine = SupabaseRAG(client)
         rag_queue = asyncio.Queue()
 
+        def on_model_speak(text):
+            print(f"[🤖 Gemini]: {text}")
+            logger.log_message('gemini', text)
+
         print(f"\n🚀 모델({MODEL_ID}) 연결 중...")
         print("📱 Flutter 앱에서 카메라와 오디오를 전송받습니다...")
         print("   (노트북 웹캠은 사용하지 않습니다)")
@@ -1297,10 +1311,6 @@ async def main():
         traceback.print_exc()
     finally:
         if 'audio_player' in locals(): audio_player.close()
-
-    except Exception as e:
-        print(f"\n❌ 메인 오류: {e}")
-        input("엔터를 누르면 종료합니다...")
 
 if __name__ == "__main__":
     asyncio.run(main())
