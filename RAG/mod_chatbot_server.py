@@ -1,5 +1,8 @@
 import os
+from pathlib import Path
 import time
+import subprocess
+import sys
 import re
 import pathlib
 from datetime import datetime
@@ -26,8 +29,8 @@ load_dotenv()
 # API 키 및 URL 로드
 SUPABASE_URL = "https://wzafalbctqkylhyzlfej.supabase.co"
 SUPABASE_KEY = os.getenv("supbase_service_role")
-GOOGLE_API_KEY = os.getenv("google_api")
-FIREBASE_KEY_PATH = "C:\dxfirebasekey\serviceAccountKey.json"
+GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
+FIREBASE_KEY_PATH = "/Users/harry/LG DX SCHOOL/lgdx_backend/serviceAccountKey.json"
 
 if not all([SUPABASE_URL, SUPABASE_KEY, GOOGLE_API_KEY]):
     raise ValueError("❌ 환경변수(.env) 설정을 확인해주세요.")
@@ -158,7 +161,105 @@ def optimize_search_query(original_query: str) -> str:
 # ==========================================
 # 3. FastAPI 서버 설정
 # ==========================================
+from fastapi.staticfiles import StaticFiles
+import asyncio
+import socket
+
 app = FastAPI()
+
+# 정적 파일 서빙 설정 (assets_generate 폴더를 /assets 경로로 노출)
+assets_path = Path(__file__).parent.parent / "generate" / "assets_generate"
+assets_path.mkdir(parents=True, exist_ok=True) # 폴더가 없으면 생성
+app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
+
+# [서버 IP 가져오기 함수]
+def get_host_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Google DNS 서버에 접속 시도하여 내 IP 확인 (실제 접속은 안함)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "localhost"
+
+SERVER_IP = get_host_ip()
+print(f"🌐 Server IP: {SERVER_IP}")
+
+
+# [비디오 감시 태스크]
+# assets 폴더를 감시하다가 새 비디오가 생기면 Firestore에 메시지를 남깁니다.
+# 이렇게 하면 Firebase Storage 없이도 앱에서 비디오가 뜹니다.
+processed_files = set()
+
+async def watch_new_videos():
+    print("👀 Video Watcher Started...")
+    
+    # 초기 상태: 이미 있는 파일은 처리된 것으로 간주 (원하면 제거 가능)
+    if assets_path.exists():
+        for f in assets_path.glob("*.mp4"):
+            processed_files.add(f.name)
+            
+    while True:
+        try:
+            if assets_path.exists():
+                # 현재 모든 mp4 파일
+                current_files = list(assets_path.glob("*.mp4"))
+                
+                for file_path in current_files:
+                    if file_path.name not in processed_files:
+                        # 새 파일 발견!
+                        print(f"🎬 New Video Detected: {file_path.name}")
+                        
+                        # 파일이 완전히 써질 때까지 잠시 대기 (옵션)
+                        await asyncio.sleep(2)
+                        
+                        # 1. 로컬 URL 생성
+                        # 예: http://192.168.0.x:8000/assets/filename.mp4
+                        video_url = f"http://{SERVER_IP}:8000/assets/{file_path.name}"
+                        
+                        # 2. Firestore에 메시지 강제 저장
+                        # (데모용: 가장 최근 방이나 기본 방에 저장)
+                        # 실제로는 generate.py에서 session_id를 파일명에 넣거나 별도 전달해야 정확함
+                        # 여기서는 'room_user_001' 등 고정값 또는 가장 최근 수정된 방을 찾음
+                        
+                        target_room_id = "room_user_001" # Default
+                        
+                        # [고급] 가장 최근 대화가 있었던 방 찾기
+                        try:
+                            # 최근 메시지가 있는 방 찾기 (복잡하므로 생략하거나 간단히 구현)
+                            # 여기서는 간단히 고정 ID 사용하되, 필요시 로직 추가
+                            pass
+                        except: pass
+
+                        print(f"📤 Sending video message to {target_room_id}...")
+                        
+                        # DB 저장
+                        doc_ref = db.collection("chat_rooms").document(target_room_id).collection("messages")
+                        doc_ref.add({
+                            "sender": "ai",
+                            "text": "솔루션 영상을 생성했습니다. (Local Server)",
+                            "video_url": video_url,
+                            "message_type": "VIDEO",
+                            "timestamp": firestore.SERVER_TIMESTAMP
+                        })
+                        
+                        print(f"✅ Saved video message: {video_url}")
+                        
+                        # 처리 목록에 추가
+                        processed_files.add(file_path.name)
+                        
+        except Exception as e:
+            print(f"⚠️ Watcher Error: {e}")
+            
+        await asyncio.sleep(3) # 3초마다 확인
+
+@app.on_event("startup")
+async def startup_event():
+    # 백그라운드 태스크로 감시 시작
+    asyncio.create_task(watch_new_videos())
+
 
 class ChatRequest(BaseModel):
     user_message: str
@@ -323,6 +424,111 @@ async def chat_endpoint(req: ChatRequest):
             sources=[]
         )
 
+# --- 비디오 상태 확인용 글로벌 변수 ---
+# 실제로는 DB나 Redis를 써야 하지만, 간단한 데모를 위해 메모리에 상태 저장
+# key: video_id (또는 user_id), value: {'status': '...', 'url': '...'}
+video_generation_status = {}
+
+@app.post("/generate-video")
+async def generate_video_endpoint():
+    try:
+        # Current file directory: lgdx_backend/RAG
+        current_dir = Path(__file__).parent
+        # Target script: lgdx_backend/generate/generate.py
+        script_path = current_dir.parent / "generate" / "generate.py"
+        
+        print(f"🎥 실행 요청: {script_path}")
+        
+        if not script_path.exists():
+             raise HTTPException(status_code=404, detail=f"Script not found at {script_path}")
+
+        # 상태를 'processing'으로 설정
+        # 실제 앱에서는 user_id 등을 받아야 함. 여기선 'demo_video'라는 고정 ID 사용
+        video_generation_status['demo_video'] = {'status': 'processing'}
+
+        # Run the script asynchronously using subprocess
+        # 스크립트가 완료되면 파일을 생성하거나 DB를 업데이트한다고 가정
+        # 여기서는 단순히 스크립트를 실행하고, 폴링 시 파일 존재 여부를 확인할 수도 있음
+        subprocess.Popen([sys.executable, str(script_path)])
+        
+        return {"status": "started", "message": "Video generation started in background"}
+    except Exception as e:
+        print(f"❌ 실행 실패: {e}")
+        video_generation_status['demo_video'] = {'status': 'failed'}
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/check-video-status")
+async def check_video_status():
+    # 1. 생성된 파일이 있는지 확인하는 로직
+    # lgdx_backend/generate/assets_generate/ 폴더 확인
+    try:
+        base_dir = Path(__file__).parent.parent / "generate" / "assets_generate"
+        
+        # 가장 최근에 생성된 mp4 파일 찾기
+        if not base_dir.exists():
+             return {"status": "processing"}
+             
+        mp4_files = list(base_dir.glob("*.mp4"))
+        if not mp4_files:
+            return {"status": "processing"}
+            
+        # 최신 파일 찾기
+        latest_file = max(mp4_files, key=os.path.getctime)
+        
+        # 파일이 생성된지 얼마 안 되었으면(예: 1분 이내) 완료로 간주
+        # 실제로는 generate.py가 완료 신호를 어딘가(DB/파일)에 남기는 게 정확함
+        # 여기서는 파일 존재만으로 체크
+        
+        # 클라이언트에서 접근 가능한 URL로 변환 필요
+        # 지금은 로컬 파일 경로를 리턴하거나, 별도 정적 파일 서빙 설정 필요
+        # 데모용: 파일명 리턴 (외부 접속을 위해 0.0.0.0 또는 호스트 IP 사용 권장, 여기선 예시로 localhost 유지하나 실제론 앱에서 접근 가능한 주소여야 함)
+        # 앱에서 접근하려면 실행 서버의 IP가 필요함. 
+        
+        # (임시) 서버 IP를 알 수 없으면 상대 경로만 리턴하고 앱에서 Base URL 붙여서 쓰게 할 수도 있음
+        return {
+            "status": "completed", 
+            "video_url": f"/assets/{latest_file.name}" 
+        }
+        
+    except Exception as e:
+        print(f"Check status error: {e}")
+        return {"status": "processing"}
+
+# -------------------------------------------------------
+# [API 2] 채팅 내역 불러오기 (History)
+# -------------------------------------------------------
+@app.get("/chat/history")
+async def get_chat_history(user_id: str):
+    """
+    특정 사용자(user_id)의 채팅 내역을 시간순으로 가져옵니다.
+    """
+    try:
+        room_id = f"room_{user_id}"
+        print(f"📂 [History] Fetching history for {room_id}")
+
+        # Firestore 쿼리 (timestamp 오름차순)
+        docs = db.collection("chat_rooms").document(room_id).collection("messages")\
+            .order_by("timestamp").stream()
+
+        messages = []
+        for doc in docs:
+            data = doc.to_dict()
+            
+            # Timestamp 처리 (JSON 직렬화를 위해 문자열 변환)
+            if "timestamp" in data and data["timestamp"]:
+                # Datetime 객체인 경우
+                if hasattr(data["timestamp"], "isoformat"):
+                    data["timestamp"] = data["timestamp"].isoformat()
+                else:
+                    data["timestamp"] = str(data["timestamp"])
+            
+            messages.append(data)
+
+        return {"messages": messages}
+
+    except Exception as e:
+        print(f"❌ History Error: {e}")
+        return {"messages": []}
 # -------------------------------------------------------
 # [API 2] 채팅방 삭제 및 새 room 생성 (room+1)
 # -------------------------------------------------------
