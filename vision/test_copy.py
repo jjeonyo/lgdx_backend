@@ -64,7 +64,7 @@ current_dir = pathlib.Path(__file__).parent.absolute()
 FIREBASE_KEY_PATH = "C:\dxfirebasekey\serviceAccountKey.json"
 
 # Realtime Database URL (Firestore 사용 시 불필요하지만 참고용으로 남김/삭제 가능)
-# FIREBASE_DATABASE_URL = "https://lgdx-6054d-default-rtdb.asia-southeast1.firebasedatabase.app/"
+FIREBASE_DATABASE_URL = "https://team-dxproject-default-rtdb.asia-southeast1.firebasedatabase.app/"
 
 MODEL_ID = "gemini-2.5-flash-native-audio-preview-09-2025"
 
@@ -153,6 +153,7 @@ class FirebaseLogger:
     def __init__(self):
         self.session_ref = None
         self.current_turn_text = ""
+        self.last_user_text = ""  # 중복 저장 방지용
         self.db = None
         self._init_firebase()
         self._start_session()
@@ -199,7 +200,12 @@ class FirebaseLogger:
             print(f"❌ 세션 생성 실패: {e}")
 
     def log_message(self, sender, text):
-        if not self.session_ref: return
+        if not self.session_ref:
+            print(f"⚠️ [Firebase] session_ref가 None입니다. 저장할 수 없습니다.")
+            return
+        if not text or not text.strip():
+            print(f"⚠️ [Firebase] 빈 텍스트입니다. 저장하지 않습니다.")
+            return
         try:
             # 현재 시간 정보 생성
             current_timestamp = int(time.time() * 1000)  # 밀리초 단위 타임스탬프
@@ -235,11 +241,17 @@ class FirebaseLogger:
             
             print(f"✅ [Firebase] 저장 성공! (chat_rooms/{room_id}/messages) - sender: {sender}, text 길이: {len(text)}, 시간: {formatted_time}")
         except Exception as e:
-            print(f"⚠️ 로그 저장 실패: {e}")
+            print(f"❌ [Firebase] 로그 저장 실패: {e}")
+            import traceback
+            traceback.print_exc()
 
     def append_text(self, text):
         """스트리밍되는 텍스트 조각을 임시 버퍼에 추가"""
-        self.current_turn_text += text
+        if text:
+            print(f"📝 [버퍼] 텍스트 추가: '{text[:50]}...' (현재 버퍼 길이: {len(self.current_turn_text)})")
+            self.current_turn_text += text
+        else:
+            print(f"⚠️ [버퍼] 빈 텍스트가 append_text에 전달됨")
 
     def flush_model_turn(self):
         """버퍼에 모인 텍스트를 한 번에 로그로 저장하고 초기화"""
@@ -285,19 +297,25 @@ class FirebaseLogger:
 class SupabaseRAG:
     def __init__(self, gemini_client):
         self.gemini_client = gemini_client
-        # .env에서 로드할 키 이름을 사용자 설정에 맞춤
-        self.supabase_url = os.getenv("SUPABASE_URL")
+        # 다른 파일들과 동일한 Supabase URL 사용 (기본값)
+        # .env 파일에서 SUPABASE_URL이 있으면 사용, 없으면 기본값 사용
+        self.supabase_url = os.getenv("SUPABASE_URL", "https://wzafalbctqkylhyzlfej.supabase.co")
+        # .env 파일에서 supbase_service_role 키 가져오기
         self.supabase_key = os.getenv("supbase_service_role") 
         self.client = None
         
-        if self.supabase_url and self.supabase_key:
+        if self.supabase_key:
             try:
                 self.client = create_client(self.supabase_url, self.supabase_key)
                 print(f"🔥 Supabase 하이브리드 엔진 연결 성공!")
+                print(f"   URL: {self.supabase_url}")
             except Exception as e:
                 print(f"❌ Supabase 초기화 오류: {e}")
+                print(f"   ⚠️ Supabase 없이 계속 진행합니다.")
         else:
-            print("❌ Supabase URL 또는 Key(supbase_service_role)를 찾을 수 없습니다.")
+            print("⚠️ Supabase Key(supbase_service_role)를 .env 파일에서 찾을 수 없습니다.")
+            print("   ⚠️ Supabase RAG 기능은 비활성화되지만, 다른 기능은 계속 작동합니다.")
+            print(f"   .env 파일 위치: {pathlib.Path(__file__).parent.parent.absolute() / '.env'}")
 
     def get_embedding(self, text):
         if not self.gemini_client: return None
@@ -402,7 +420,7 @@ class AsyncAudioPlayer:
 # ==========================================
 def get_config():
     current_dir = pathlib.Path(__file__).parent.absolute()
-    persona_path = current_dir / "persona/persona_세탁법.txt"
+    persona_path = current_dir / "persona/persona_세탁기사용법.txt"
     
     system_instruction = "너는 도움이 되는 LG전자의 AI 어시스턴트야."
     if persona_path.exists():
@@ -418,7 +436,7 @@ def get_config():
         "speech_config": {
             "voice_config": {
                 "prebuilt_voice_config": {
-                    "voice_name": "Kore" # 목소리 바꾸기
+                    "voice_name": "Laomedeia" # 목소리 바꾸기
                 }
             }
         },
@@ -450,6 +468,8 @@ def get_config():
             activity_handling=types.ActivityHandling.NO_INTERRUPTION
         )
     }
+
+
 # ==========================================
 # [API 설정] FastAPI & Chat Endpoint
 # ==========================================
@@ -995,6 +1015,7 @@ async def main():
         def on_model_speak(text):
             print(f"[🤖 Gemini]: {text}")
             logger.log_message('gemini', text)
+
         print(f"\n🚀 모델({MODEL_ID}) 연결 중...")
         print("📱 Flutter 앱에서 카메라와 오디오를 전송받습니다...")
         print("   (노트북 웹캠은 사용하지 않습니다)")
@@ -1010,6 +1031,67 @@ async def main():
                 while running:
                     try:
                         async for response in session.receive():
+                            response_count += 1
+                            
+                            # [추가] 음성 인식 이벤트 처리 - 사용자 음성을 텍스트로 저장
+                            # Gemini Live API의 response 구조 확인
+                            speech_recognition = None
+                            
+                            # 방법 1: response의 직접 속성
+                            if hasattr(response, 'speech_recognition_event'):
+                                speech_recognition = response.speech_recognition_event
+                            
+                            # 방법 2: server_content 안에 있을 수도 있음
+                            if speech_recognition is None:
+                                server_content_temp = getattr(response, 'server_content', None)
+                                if server_content_temp:
+                                    if hasattr(server_content_temp, 'speech_recognition_event'):
+                                        speech_recognition = server_content_temp.speech_recognition_event
+                            
+                            # 방법 3: response 객체 전체 구조 확인 (처음 몇 번만)
+                            if response_count <= 3:
+                                print(f"🔍 [디버그 #{response_count}] response 타입: {type(response)}")
+                                response_attrs = [attr for attr in dir(response) if not attr.startswith('_')]
+                                print(f"🔍 [디버그] response 속성: {response_attrs[:10]}...")  # 처음 10개만
+                            
+                            if speech_recognition:
+                                print(f"🔍 [디버그] speech_recognition 이벤트 발견! 타입: {type(speech_recognition)}")
+                                # transcript 속성 확인 (다양한 가능한 속성 이름 시도)
+                                recognized_text = None
+                                
+                                # 가능한 속성 이름들 시도
+                                for attr_name in ['transcript', 'text', 'content', 'message']:
+                                    if hasattr(speech_recognition, attr_name):
+                                        attr_value = getattr(speech_recognition, attr_name)
+                                        if attr_value:
+                                            recognized_text = str(attr_value)
+                                            print(f"🔍 [디버그] '{attr_name}' 속성에서 텍스트 발견: {recognized_text[:50]}")
+                                            break
+                                
+                                # 속성을 찾지 못했다면 모든 속성 출력
+                                if recognized_text is None:
+                                    speech_attrs = [attr for attr in dir(speech_recognition) if not attr.startswith('_')]
+                                    print(f"🔍 [디버그] speech_recognition 속성: {speech_attrs}")
+                                    # 값이 있는 속성만 출력
+                                    for attr in speech_attrs:
+                                        try:
+                                            value = getattr(speech_recognition, attr)
+                                            if value and not callable(value):
+                                                print(f"   - {attr}: {value}")
+                                        except:
+                                            pass
+                                
+                                if recognized_text and recognized_text.strip():
+                                    # is_final이 True일 때만 최종 인식된 텍스트를 저장
+                                    is_final = getattr(speech_recognition, 'is_final', False)
+                                    print(f"🔍 [디버그] 인식된 텍스트: '{recognized_text}', is_final: {is_final}")
+                                    if is_final:
+                                        print(f"\n🎤 [사용자 음성 인식] {recognized_text}")
+                                        logger.log_message('user', recognized_text.strip())
+                                    else:
+                                        # 중간 인식 결과는 화면에만 표시 (저장하지 않음)
+                                        print(f"\r🎤 [인식 중...] {recognized_text}", end="", flush=True)
+
                             server_content = response.server_content
                             if server_content is None:
                                 continue
@@ -1056,11 +1138,15 @@ async def main():
 
                             model_turn = server_content.model_turn
                             if model_turn:
-                                for part in model_turn.parts:
-                                    
+                                parts = getattr(model_turn, 'parts', [])
+                                print(f"🔍 [디버그 #{response_count}] model_turn 발견! parts 개수: {len(parts)}")
+                                
+                                for idx, part in enumerate(parts):
                                     # [핵심 수정] "생각(Thought)" 데이터면 출력하지 않고 건너뜀
                                     # google-genai 최신 버전에서는 part.thought 속성으로 구분 가능
-                                    if getattr(part, "thought", False):
+                                    is_thought = getattr(part, "thought", False)
+                                    if is_thought:
+                                        print(f"🔍 [디버그] part[{idx}]는 생각(thought)이므로 건너뜀")
                                         continue
 
                                     # 1. 텍스트 데이터 처리 (우선 처리 - 텍스트가 있으면 저장)
@@ -1175,7 +1261,9 @@ async def main():
 
             # [Task 6] Command Watcher
             async def command_watcher():
+                # 세션이 생성되지 않았으면 종료
                 if not logger.session_ref:
+                    print("⚠️ 세션이 생성되지 않아 command_watcher를 시작할 수 없습니다.")
                     return
 
                 current_session_id = logger.session_ref.id
@@ -1223,16 +1311,6 @@ async def main():
         traceback.print_exc()
     finally:
         if 'audio_player' in locals(): audio_player.close()
-
-    except Exception as e:
-        print(f"오류 발생: {e}")
-        traceback.print_exc()
-    finally:
-        if 'audio_player' in locals(): audio_player.close()
-        if 'input_stream' in locals(): input_stream.stop_stream(); input_stream.close()
-        if 'p' in locals(): p.terminate()
-        if 'cap' in locals(): cap.release()
-        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     asyncio.run(main())

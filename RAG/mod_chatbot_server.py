@@ -3,6 +3,9 @@ from pathlib import Path
 import time
 import subprocess
 import sys
+import re
+import pathlib
+from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -12,10 +15,15 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 import google.generativeai as genai
 from google.api_core import exceptions
+from google.api_core.exceptions import ResourceExhausted
 
 # ==========================================
 # 1. 환경 설정 및 초기화
 # ==========================================
+# 상위 폴더의 .env 파일 로드 (프로젝트 루트에 있는 경우)
+env_path = pathlib.Path(__file__).parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
+# 현재 폴더의 .env도 시도 (하위 호환성)
 load_dotenv()
 
 # API 키 및 URL 로드
@@ -57,20 +65,23 @@ print(f"🚀 AI 모델 로드 완료: {GENERATION_MODEL_ID}")
 # 2. 헬퍼 함수들
 # ==========================================
 
-def save_to_firebase(user_id: str, sender: str, text: str, msg_type: str = "TEXT"):
+def save_to_firebase(user_id: str, sender: str, text: str, room_id: Optional[str] = None, msg_type: str = "TEXT"):
     try:
-        room_id = f"room_{user_id}"
+        # room_id가 제공되지 않으면 기본값 사용 (하위 호환성)
+        if room_id is None:
+            room_id = f"room_{user_id}"
         doc_ref = db.collection("chat_rooms").document(room_id).collection("messages")
         message_data = {
             "sender": sender,
-            "text": text,
-            "content": text,  # vision/test.py와 통일을 위해 content 필드도 추가
-            "message_type": "chat_bot",  # 메시지 타입: 'chat_bot' (텍스트 챗봇)
-            "timestamp": firestore.SERVER_TIMESTAMP
+            "text": text,              # 메시지 내용 (통일된 필드명)
+            "message_type": "chat",    # 메시지 타입: 'chat' (텍스트 챗봇)
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # 형식: "2025-12-05 14:38:02"
         }
         doc_ref.add(message_data)
         print(f"💾 [Firebase] 저장 완료 - room: {room_id}, sender: {sender}, text: {text[:30]}...")
+        print(f"💾 [Firebase] 저장 경로: chat_rooms/{room_id}/messages")
         print(f"💾 [Firebase] 저장된 데이터: {message_data}")
+        print(f"💾 [Firebase] Flutter 앱에서 읽을 경로: chat_rooms/{room_id}/messages")
     except Exception as e:
         print(f"❌ [Firebase] 저장 실패: {e}")
         import traceback
@@ -88,6 +99,42 @@ def get_embedding(text: str):
         print(f"❌ 임베딩 생성 실패: {e}")
         return None
 
+def generate_with_retry(prompt: str, max_retries: int = 3, initial_delay: float = 1.0) -> Optional[str]:
+    """
+    Gemini API 호출을 재시도 로직과 함께 실행합니다.
+    ResourceExhausted 에러 발생 시 지수 백오프로 재시도합니다.
+    """
+    for attempt in range(max_retries):
+        try:
+            response = GENERATION_MODEL.generate_content(prompt)
+            return response.text.strip() if response.text else None
+        except ResourceExhausted as e:
+            error_str = str(e)
+            # 재시도 대기 시간 추출 (에러 메시지에서)
+            retry_delay = initial_delay * (2 ** attempt)  # 지수 백오프
+            
+            # 에러 메시지에서 retry_delay 정보 추출 시도
+            if "retry in" in error_str.lower() or "retry_delay" in error_str.lower():
+                try:
+                    # 에러 메시지에서 seconds 정보 추출
+                    delay_match = re.search(r'(\d+\.?\d*)\s*seconds?', error_str, re.IGNORECASE)
+                    if delay_match:
+                        retry_delay = float(delay_match.group(1))
+                except:
+                    pass
+            
+            if attempt < max_retries - 1:
+                print(f"⚠️ [재시도 {attempt + 1}/{max_retries}] API 할당량 초과. {retry_delay:.1f}초 후 재시도...")
+                time.sleep(retry_delay)
+            else:
+                print(f"❌ [최종 실패] API 할당량 초과. 재시도 횟수 초과.")
+                raise
+        except Exception as e:
+            print(f"❌ API 호출 실패: {e}")
+            raise
+    
+    return None
+
 def optimize_search_query(original_query: str) -> str:
     """사용자 질문을 검색용 키워드로 변환 (쿼리 확장)"""
     try:
@@ -97,10 +144,17 @@ def optimize_search_query(original_query: str) -> str:
         사용자: "{original_query}"
         변환:
         """
-        response = GENERATION_MODEL.generate_content(prompt)
-        return response.text.strip()
+        result = generate_with_retry(prompt, max_retries=2, initial_delay=2.0)
+        if result:
+            return result
+        else:
+            print(f"⚠️ 쿼리 확장 실패: 원본 쿼리 사용")
+            return original_query
+    except ResourceExhausted as e:
+        print(f"⚠️ 쿼리 확장 실패 (할당량 초과): 원본 쿼리 사용")
+        return original_query
     except Exception as e:
-        print(f"⚠️ 쿼리 확장 실패: {e}")
+        print(f"⚠️ 쿼리 확장 실패: {e} - 원본 쿼리 사용")
         return original_query
 
 
@@ -210,22 +264,35 @@ async def startup_event():
 class ChatRequest(BaseModel):
     user_message: str
     user_id: str
+    session_id: Optional[str] = None  # room_id (예: room_user_001, room_user_002)
 
 class ChatResponse(BaseModel):
     answer: str
     sources: List[str]
+
+class DeleteRoomRequest(BaseModel):
+    userId: str
+    roomId: Optional[str] = None
+
+class DeleteRoomResponse(BaseModel):
+    success: bool
+    message: str
+    newRoomId: Optional[str] = None
 
 # -------------------------------------------------------
 # [API 1] 텍스트 챗봇 (하이브리드 검색 적용)
 # -------------------------------------------------------
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest):
-    print(f"📩 [Python] 요청 도착 - userId: {req.user_id}, message: {req.user_message}")
+    # room_id 결정: session_id가 있으면 사용, 없으면 기본값 사용 (하위 호환성)
+    room_id = req.session_id if req.session_id else f"room_{req.user_id}"
+    print(f"📩 [Python] 요청 도착 - userId: {req.user_id}, sessionId: {req.session_id}, roomId: {room_id}, message: {req.user_message[:50]}...")
     
     try:
-        # 1. 사용자 질문 저장
-        print(f"💾 [Python] 사용자 메시지 Firebase 저장 시작...")
-        save_to_firebase(req.user_id, "user", req.user_message)
+        # 1. 사용자 질문 저장은 프론트엔드에서 이미 저장하므로 여기서는 저장하지 않음
+        # (프론트엔드에서 Optimistic Update로 저장함)
+        # 백엔드에서도 저장하면 중복 저장이 발생하므로 제거
+        print(f"💾 [Python] 사용자 메시지는 프론트엔드에서 이미 저장되었으므로 저장 생략 (중복 방지)")
 
         # 2. 쿼리 확장 (키워드 검색용)
         search_keyword = optimize_search_query(req.user_message)
@@ -283,22 +350,75 @@ async def chat_endpoint(req: ChatRequest):
             [답변]:
             """
             
-            # 6. 답변 생성
-            gen_resp = GENERATION_MODEL.generate_content(prompt)
-            final_answer = gen_resp.text
+            # 6. 답변 생성 (재시도 로직 포함)
+            try:
+                final_answer = generate_with_retry(prompt, max_retries=3, initial_delay=5.0)
+                if not final_answer:
+                    raise Exception("답변 생성 실패: 빈 응답")
+            except ResourceExhausted as e:
+                error_msg = str(e)
+                retry_seconds = 60  # 기본값
+                
+                # 에러 메시지에서 재시도 시간 추출
+                delay_match = re.search(r'(\d+\.?\d*)\s*seconds?', error_msg, re.IGNORECASE)
+                if delay_match:
+                    retry_seconds = int(float(delay_match.group(1)))
+                
+                final_answer = f"""죄송합니다. 현재 AI 서비스의 일일 사용 한도에 도달했습니다. 
+
+일일 무료 사용량(20회)을 초과하여 서비스를 일시적으로 사용할 수 없습니다. 
+약 {retry_seconds}초 후에 다시 시도해주시거나, 내일 다시 이용해주세요.
+
+더 많은 사용량이 필요하시다면 Google AI Studio에서 유료 플랜으로 업그레이드하시기 바랍니다.
+고객센터: https://ai.google.dev/gemini-api/docs/rate-limits"""
+                
+                print(f"❌ API 할당량 초과로 인한 오류 발생. 사용자에게 안내 메시지 전송.")
+            except Exception as e:
+                print(f"❌ 답변 생성 중 오류: {e}")
+                raise
 
         # 7. 답변 저장
         print(f"💾 [Python] AI 답변 Firebase 저장 시작...")
-        save_to_firebase(req.user_id, "ai", final_answer)
+        save_to_firebase(req.user_id, "ai", final_answer, room_id)
         print(f"✅ [Python] 답변 완료 및 저장 완료: {final_answer[:30]}...")
+        print(f"📤 [Python] 응답 반환 준비 - answer 길이: {len(final_answer)}, sources 개수: {len(source_titles)}")
 
-        return ChatResponse(
+        response = ChatResponse(
             answer=final_answer,
             sources=source_titles
         )
+        print(f"✅ [Python] 응답 반환 완료!")
+        return response
 
+    except ResourceExhausted as e:
+        error_msg = str(e)
+        retry_seconds = 60  # 기본값
+        
+        # 에러 메시지에서 재시도 시간 추출
+        delay_match = re.search(r'(\d+\.?\d*)\s*seconds?', error_msg, re.IGNORECASE)
+        if delay_match:
+            retry_seconds = int(float(delay_match.group(1)))
+        
+        print(f"❌ 서버 에러 (할당량 초과): {e}")
+        import traceback
+        traceback.print_exc()
+        
+        quota_message = f"""죄송합니다. 현재 AI 서비스의 일일 사용 한도에 도달했습니다.
+
+일일 무료 사용량(20회)을 초과하여 서비스를 일시적으로 사용할 수 없습니다.
+약 {retry_seconds}초 후에 다시 시도해주시거나, 내일 다시 이용해주세요.
+
+더 많은 사용량이 필요하시다면 Google AI Studio에서 유료 플랜으로 업그레이드하시기 바랍니다.
+고객센터: https://ai.google.dev/gemini-api/docs/rate-limits"""
+        
+        return ChatResponse(
+            answer=quota_message,
+            sources=[]
+        )
     except Exception as e:
         print(f"❌ 서버 에러: {e}")
+        import traceback
+        traceback.print_exc()
         return ChatResponse(
             answer=f"죄송합니다. 오류가 발생했습니다. ({str(e)})",
             sources=[]
@@ -409,6 +529,78 @@ async def get_chat_history(user_id: str):
     except Exception as e:
         print(f"❌ History Error: {e}")
         return {"messages": []}
+# -------------------------------------------------------
+# [API 2] 채팅방 삭제 및 새 room 생성 (room+1)
+# -------------------------------------------------------
+@app.post("/room/delete", response_model=DeleteRoomResponse)
+async def delete_room_endpoint(req: DeleteRoomRequest):
+    try:
+        print(f"🗑️ [Python] 채팅방 삭제 요청 - userId: {req.userId}, roomId: {req.roomId}")
+        
+        if not req.userId or req.userId.strip() == "":
+            raise HTTPException(status_code=400, detail="userId가 필요합니다.")
+        
+        # 1. 기존 room_user_XXX 형태의 모든 room 조회
+        rooms_ref = db.collection("chat_rooms")
+        rooms_snapshot = rooms_ref.stream()
+        
+        print(f"📋 [Python] 전체 rooms 조회 시작...")
+        
+        # 2. room_user_로 시작하는 문서들 중에서 가장 큰 숫자 찾기
+        import re
+        max_number = 0
+        pattern = re.compile(r"^room_user_(\d+)$")
+        
+        room_count = 0
+        for doc in rooms_snapshot:
+            room_count += 1
+            doc_id = doc.id
+            match = pattern.match(doc_id)
+            if match:
+                try:
+                    number = int(match.group(1))
+                    if number > max_number:
+                        max_number = number
+                    print(f"📋 [Python] room 발견: {doc_id} (숫자: {number})")
+                except ValueError:
+                    print(f"⚠️ [Python] 숫자 파싱 실패: {doc_id}")
+        
+        print(f"📋 [Python] 전체 rooms 조회 완료: {room_count}개, 최대값: {max_number}")
+        
+        # 3. 새로운 room_id 생성 (가장 큰 숫자 + 1)
+        new_room_number = max_number + 1
+        new_room_id = f"room_user_{new_room_number:03d}"  # 001, 002 형식
+        
+        print(f"✅ [Python] 새 room_id 생성: {new_room_id} (이전 최대값: {max_number})")
+        
+        # 4. 새로운 room 문서 생성 (messages 서브컬렉션은 자동으로 생성됨)
+        new_room_data = {
+            "createdAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "userId": req.userId
+        }
+        
+        rooms_ref.document(new_room_id).set(new_room_data)
+        
+        print(f"✅ [Python] 새 room 문서 생성 완료: {new_room_id}")
+        print(f"✅ [Python] Firebase 경로: chat_rooms/{new_room_id}")
+        
+        return DeleteRoomResponse(
+            success=True,
+            message="채팅방이 삭제되었고 새 채팅방이 생성되었습니다.",
+            newRoomId=new_room_id
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [Python] 채팅방 삭제 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"채팅방 삭제 실패: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn

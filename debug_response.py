@@ -10,7 +10,7 @@ except ImportError:
     exit(1)
 
 load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("google_api")
 MODEL_ID = "gemini-2.5-flash-native-audio-preview-09-2025"
 
 config = {
