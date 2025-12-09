@@ -27,10 +27,10 @@ load_dotenv(dotenv_path=env_path)
 load_dotenv()
 
 # API 키 및 URL 로드
-SUPABASE_URL = "https://wzafalbctqkylhyzlfej.supabase.co"
-SUPABASE_KEY = os.getenv("supbase_service_role")
-GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
-FIREBASE_KEY_PATH = "/Users/harry/LG DX SCHOOL/lgdx_backend/serviceAccountKey.json"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+FIREBASE_KEY_PATH = r"C:\Users\jhj\Desktop\ELLE\lgdx_backend\serviceAccountKey.json"
 
 if not all([SUPABASE_URL, SUPABASE_KEY, GOOGLE_API_KEY]):
     raise ValueError("❌ 환경변수(.env) 설정을 확인해주세요.")
@@ -53,7 +53,6 @@ genai.configure(api_key=GOOGLE_API_KEY)
 
 # 모델 설정 (최신 모델 적용)
 EMBEDDING_MODEL = "models/text-embedding-004"
-# 사용자님이 원하신 2.5 버전이 아직 정식 배포 전이라면 2.0-flash-exp 사용 권장
 # 만약 2.5 접근 권한이 있으시면 "gemini-2.5-flash"로 바꾸세요.
 GENERATION_MODEL_ID = "gemini-2.5-flash" 
 GENERATION_MODEL = genai.GenerativeModel(GENERATION_MODEL_ID)

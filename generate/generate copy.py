@@ -6,6 +6,7 @@ import datetime
 from dotenv import load_dotenv
 import google.genai as genai
 from google.genai import types
+from openai import OpenAI
 from PIL import Image
 import time
 import socket
@@ -21,6 +22,7 @@ from firebase_admin import storage
 project_root = Path(__file__).resolve().parents[1]
 load_dotenv(project_root / ".env")
 API_KEY = os.getenv("GOOGLE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Firebase 설정 (vision.py와 동일한 키 사용)
 # serviceAccountKey.json은 프로젝트 루트에 위치함
@@ -49,9 +51,13 @@ if not FIREBASE_KEY_PATH.exists():
 if not API_KEY:
     print("❌ API 키가 없습니다. .env 파일을 확인하거나 코드를 수정하세요.")
     exit()
+if not OPENAI_API_KEY:
+    print("❌ OPENAI_API_KEY가 없습니다. .env 파일에 OpenAI 키를 추가하세요.")
+    exit()
 
 # 클라이언트 초기화
 client = genai.Client(api_key=API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 def get_host_ip():
     """현재 서버의 로컬 IP 주소를 반환합니다."""
@@ -258,30 +264,21 @@ def save_video_message_to_firestore(session_id, video_url):
 def generate_solution_video(visual_prompt, output_filename="solution.mp4"):
     print("🎥 비디오 생성 중... (시간이 소요될 수 있습니다)")
     try:
-        operation = client.models.generate_videos(
-            model="veo-3.1-fast-generate-preview",
+        # OpenAI Sora v2 호출
+        response = openai_client.videos.generate(
+            model="sora-2",
             prompt=visual_prompt,
-            config=types.GenerateVideosConfig(
-                aspect_ratio="9:16",
-                duration_seconds=8,
-            )
+            duration=8,
+            aspect_ratio="9:16"
         )
 
-        while not operation.done:
-            print("Waiting for video generation to complete...")
-            time.sleep(3)
-            operation = client.operations.get(operation)
+        # 스트림으로 바로 파일 저장
+        with open(output_filename, "wb") as f:
+            for chunk in response.iter_bytes():
+                f.write(chunk)
 
-        # Download the generated video.
-        if operation.response.generated_videos:
-            generated_video = operation.response.generated_videos[0]
-            client.files.download(file=generated_video.video)
-            generated_video.video.save(output_filename)
-            print(f"✅ Generated video saved to {output_filename}")
-            return output_filename
-        else:
-            print("❌ 비디오가 생성되지 않았습니다.")
-            return None
+        print(f"✅ Generated video saved to {output_filename}")
+        return output_filename
 
     except Exception as e:
         print(f"❌ 비디오 생성 오류: {e}")

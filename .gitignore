@@ -77,3 +77,4 @@ Spring\ Boot/
 assets_generate/
 vision/FirebaseAdmin.json
 .serviceAccountKey.json
+serviceAccountKey.json

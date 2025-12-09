@@ -1,0 +1,21 @@
+    """
+    대화 내용을 바탕으로 영상 생성용 프롬프트(영어)를 작성합니다.
+    """
+    """
+    사용자의 현재 문제 : 
+    """
+    print(conversation_context)
+    print("🤔 대화 내용 분석 및 프롬프트 작성 중...")
+    
+    prompt_instruction = f"""
+    Analyze the following conversation history between a user and an AI assistant about a washing machine problem.
+    Identify the specific problem or the solution being discussed.
+    
+    [Conversation History]
+    {conversation_context}
+    
+    Based on this, create a high-quality, cinematic, and detailed visual prompt for a video generation model.
+    The video should depict the solution or the maintenance step clearly.
+    Focus on realistic textures, lighting, and clear action.
+ 
+    """
