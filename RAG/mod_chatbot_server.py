@@ -27,10 +27,10 @@ load_dotenv(dotenv_path=env_path)
 load_dotenv()
 
 # API 키 및 URL 로드
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-FIREBASE_KEY_PATH = r"C:\Users\jhj\Desktop\ELLE\lgdx_backend\serviceAccountKey.json"
+SUPABASE_URL = "https://wzafalbctqkylhyzlfej.supabase.co"
+SUPABASE_KEY = os.getenv("supbase_service_role")
+GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
+FIREBASE_KEY_PATH = r"C:\dxfirebasekey\serviceAccountKey.json"
 
 if not all([SUPABASE_URL, SUPABASE_KEY, GOOGLE_API_KEY]):
     raise ValueError("❌ 환경변수(.env) 설정을 확인해주세요.")

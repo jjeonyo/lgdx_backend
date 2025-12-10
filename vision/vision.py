@@ -17,6 +17,7 @@ from typing import List
 import base64
 import json
 import asyncio
+import hashlib
 
 
 # [Firebase 라이브러리 추가]
@@ -325,7 +326,7 @@ class SupabaseRAG:
             return []
 
 # ==========================================
-# [클래스] 비동기 오디오 플레이어
+# [클래스] 비동기 오디오 플레이어 (에코 방지 강화)
 # ==========================================
 class AsyncAudioPlayer:
     def __init__(self):
@@ -339,6 +340,8 @@ class AsyncAudioPlayer:
         )
         self.running = True
         self.is_playing = False
+        self.last_play_time = 0  # 마지막 재생 시간 추적
+        self.play_end_delay = 0.8  # 재생 종료 후 추가 대기 시간 (초)
         self.thread = threading.Thread(target=self._play_loop, daemon=True)
         self.thread.start()
 
@@ -348,14 +351,32 @@ class AsyncAudioPlayer:
                 data = self.queue.get(timeout=0.05)
                 self.is_playing = True
                 self.stream.write(data)
+                self.last_play_time = time.time()  # 재생 중일 때 시간 업데이트
             except queue.Empty:
-                self.is_playing = False
+                # 큐가 비었어도 최근 재생 시간을 확인하여 추가 대기
+                current_time = time.time()
+                if current_time - self.last_play_time < self.play_end_delay:
+                    # 아직 대기 시간이 지나지 않았으면 계속 playing 상태 유지
+                    self.is_playing = True
+                else:
+                    self.is_playing = False
                 continue
             except Exception:
                 pass
 
     def add_audio(self, data):
         self.queue.put(data)
+        self.last_play_time = time.time()  # 새 오디오 추가 시 시간 업데이트
+
+    def is_safe_to_listen(self):
+        """마이크 입력이 안전한지 확인 (에코 방지)"""
+        if self.is_playing:
+            return False
+        # 재생이 끝난 후에도 추가 대기 시간 확인
+        current_time = time.time()
+        if current_time - self.last_play_time < self.play_end_delay:
+            return False
+        return True
 
     def close(self):
         self.running = False
@@ -476,12 +497,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     if message['type'] == 'audio':
                         # Base64 -> Bytes -> Gemini
                         audio_bytes = base64.b64decode(message['data'])
+                        # 입력 오디오의 해시와 크기를 찍어 비교 (프론트가 같은 데이터를 보내는지 확인)
+                        print(f"[DBG] recv audio bytes={len(audio_bytes)}, md5={hashlib.md5(audio_bytes).hexdigest()[:10]}")
                         await session.send_realtime_input(
                             audio=types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
                         )
                     elif message['type'] == 'image':
                         # Base64 -> Bytes -> Gemini
                         image_bytes = base64.b64decode(message['data'])
+                        # 입력 이미지의 해시와 크기를 찍어 비교
+                        print(f"[DBG] recv image bytes={len(image_bytes)}, md5={hashlib.md5(image_bytes).hexdigest()[:10]}")
                         await session.send_realtime_input(
                             video=types.Blob(data=image_bytes, mime_type="image/jpeg")
                         )
@@ -592,16 +617,53 @@ async def main():
                         except Exception: pass
                     await asyncio.sleep(0.5)
 
-            # [Task 3] 오디오 입력 (User)
+            # [Task 3] 오디오 입력 (User) - 에코 방지 강화
             async def send_audio():
+                # numpy가 없으면 간단한 레벨 체크 사용
+                try:
+                    import numpy as np
+                    use_numpy = True
+                except ImportError:
+                    use_numpy = False
+                    print("⚠️ numpy가 설치되지 않아 간단한 오디오 레벨 체크를 사용합니다.")
+                
+                # 마이크 입력 레벨 임계값 (너무 작은 소리는 무시)
+                # 조정 가능: 값이 클수록 더 큰 소리만 인식 (기본값: 500)
+                AUDIO_THRESHOLD = 500
+                
+                def check_audio_level(data):
+                    """오디오 레벨 체크 (numpy 사용 또는 간단한 방법)"""
+                    if use_numpy:
+                        try:
+                            audio_array = np.frombuffer(data, dtype=np.int16)
+                            return np.abs(audio_array).mean()
+                        except:
+                            return 0
+                    else:
+                        # numpy 없이 간단한 체크: 바이트 데이터의 절대값 평균
+                        try:
+                            audio_bytes = bytearray(data)
+                            total = sum(abs(b - 128) for b in audio_bytes[:len(audio_bytes)//2])  # 샘플링
+                            return total / (len(audio_bytes) // 2) if len(audio_bytes) > 0 else 0
+                        except:
+                            return 0
+                
                 while shared_state["running"]:
                     try:
                         data = await asyncio.to_thread(input_stream.read, CHUNK_SIZE, exception_on_overflow=False)
                         
-                        # [수정] 봇이 말하고 있을 때는 마이크 입력을 모델에 보내지 않음 (Self-Interruption 방지)
-                        if audio_player.is_playing:
+                        # [에코 방지 1] AI가 말하고 있거나 말을 끝낸 직후에는 마이크 입력 무시
+                        if not audio_player.is_safe_to_listen():
+                            continue
+                        
+                        # [에코 방지 2] 마이크 입력 레벨 체크 (너무 작은 소리는 무시)
+                        audio_level = check_audio_level(data)
+                        
+                        if audio_level < AUDIO_THRESHOLD:
+                            # 너무 작은 소리는 무시 (배경 소음 또는 에코 가능성)
                             continue
 
+                        # [에코 방지 3] 안전한 경우에만 모델에 전송
                         await session.send_realtime_input(audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000"))
                     except Exception: break
 

@@ -64,7 +64,7 @@ current_dir = pathlib.Path(__file__).parent.absolute()
 FIREBASE_KEY_PATH = "C:\dxfirebasekey\serviceAccountKey.json"
 
 # Realtime Database URL (Firestore 사용 시 불필요하지만 참고용으로 남김/삭제 가능)
-FIREBASE_DATABASE_URL = "https://team-dxproject-default-rtdb.asia-southeast1.firebasedatabase.app/"
+# FIREBASE_DATABASE_URL = "https://lgdx-6054d-default-rtdb.asia-southeast1.firebasedatabase.app/"
 
 MODEL_ID = "gemini-2.5-flash-native-audio-preview-09-2025"
 
@@ -153,7 +153,7 @@ class FirebaseLogger:
     def __init__(self):
         self.session_ref = None
         self.current_turn_text = ""
-        self.last_user_text = ""  # 중복 저장 방지용
+        self.last_user_text = ""  # 최근 사용자 발화 저장해 중복 로그 방지
         self.db = None
         self._init_firebase()
         self._start_session()
@@ -200,12 +200,7 @@ class FirebaseLogger:
             print(f"❌ 세션 생성 실패: {e}")
 
     def log_message(self, sender, text):
-        if not self.session_ref:
-            print(f"⚠️ [Firebase] session_ref가 None입니다. 저장할 수 없습니다.")
-            return
-        if not text or not text.strip():
-            print(f"⚠️ [Firebase] 빈 텍스트입니다. 저장하지 않습니다.")
-            return
+        if not self.session_ref: return
         try:
             # 현재 시간 정보 생성
             current_timestamp = int(time.time() * 1000)  # 밀리초 단위 타임스탬프
@@ -241,17 +236,11 @@ class FirebaseLogger:
             
             print(f"✅ [Firebase] 저장 성공! (chat_rooms/{room_id}/messages) - sender: {sender}, text 길이: {len(text)}, 시간: {formatted_time}")
         except Exception as e:
-            print(f"❌ [Firebase] 로그 저장 실패: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"⚠️ 로그 저장 실패: {e}")
 
     def append_text(self, text):
         """스트리밍되는 텍스트 조각을 임시 버퍼에 추가"""
-        if text:
-            print(f"📝 [버퍼] 텍스트 추가: '{text[:50]}...' (현재 버퍼 길이: {len(self.current_turn_text)})")
-            self.current_turn_text += text
-        else:
-            print(f"⚠️ [버퍼] 빈 텍스트가 append_text에 전달됨")
+        self.current_turn_text += text
 
     def flush_model_turn(self):
         """버퍼에 모인 텍스트를 한 번에 로그로 저장하고 초기화"""
@@ -297,25 +286,19 @@ class FirebaseLogger:
 class SupabaseRAG:
     def __init__(self, gemini_client):
         self.gemini_client = gemini_client
-        # 다른 파일들과 동일한 Supabase URL 사용 (기본값)
-        # .env 파일에서 SUPABASE_URL이 있으면 사용, 없으면 기본값 사용
-        self.supabase_url = os.getenv("SUPABASE_URL", "https://wzafalbctqkylhyzlfej.supabase.co")
-        # .env 파일에서 supbase_service_role 키 가져오기
+        # .env에서 로드할 키 이름을 사용자 설정에 맞춤
+        self.supabase_url = os.getenv("SUPABASE_URL")
         self.supabase_key = os.getenv("supbase_service_role") 
         self.client = None
         
-        if self.supabase_key:
+        if self.supabase_url and self.supabase_key:
             try:
                 self.client = create_client(self.supabase_url, self.supabase_key)
                 print(f"🔥 Supabase 하이브리드 엔진 연결 성공!")
-                print(f"   URL: {self.supabase_url}")
             except Exception as e:
                 print(f"❌ Supabase 초기화 오류: {e}")
-                print(f"   ⚠️ Supabase 없이 계속 진행합니다.")
         else:
-            print("⚠️ Supabase Key(supbase_service_role)를 .env 파일에서 찾을 수 없습니다.")
-            print("   ⚠️ Supabase RAG 기능은 비활성화되지만, 다른 기능은 계속 작동합니다.")
-            print(f"   .env 파일 위치: {pathlib.Path(__file__).parent.parent.absolute() / '.env'}")
+            print("❌ Supabase URL 또는 Key(supbase_service_role)를 찾을 수 없습니다.")
 
     def get_embedding(self, text):
         if not self.gemini_client: return None
@@ -420,7 +403,7 @@ class AsyncAudioPlayer:
 # ==========================================
 def get_config():
     current_dir = pathlib.Path(__file__).parent.absolute()
-    persona_path = current_dir / "persona/persona_세탁기사용법.txt"
+    persona_path = current_dir / "persona/persona_세탁법.txt"
     
     system_instruction = "너는 도움이 되는 LG전자의 AI 어시스턴트야."
     if persona_path.exists():
@@ -436,7 +419,7 @@ def get_config():
         "speech_config": {
             "voice_config": {
                 "prebuilt_voice_config": {
-                    "voice_name": "Laomedeia" # 목소리 바꾸기
+                    "voice_name": "Kore" # 목소리 바꾸기
                 }
             }
         },
@@ -468,8 +451,6 @@ def get_config():
             activity_handling=types.ActivityHandling.NO_INTERRUPTION
         )
     }
-
-
 # ==========================================
 # [API 설정] FastAPI & Chat Endpoint
 # ==========================================
@@ -539,6 +520,10 @@ async def websocket_endpoint(websocket: WebSocket):
     # Firebase 로거 초기화 (WebSocket 세션별)
     logger = FirebaseLogger()
     
+    # 최신 프레임만 유지하는 컨테이너 (프레임 드롭 전략)
+    latest_image = {"data": None}
+    last_send_time = {"ts": 0.0}
+    
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         print("✅ Gemini Live Session Started")
 
@@ -590,11 +575,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                 # 세션이 닫혔거나 문제가 있을 수 있음
                                 raise
                         elif message['type'] == 'image':
-                            # Base64 -> Bytes -> Gemini
+                            # 이미지: 최신 컨테이너에 덮어쓰기만 하고, 전송은 별도 루프에서 처리
                             image_bytes = base64.b64decode(message['data'])
-                            await session.send_realtime_input(
-                                video=types.Blob(data=image_bytes, mime_type="image/jpeg")
-                            )
+                            latest_image["data"] = image_bytes
                         elif message['type'] == 'text':
                             # 텍스트 메시지 (RAG 검색 등에 활용 가능)
                             pass
@@ -682,6 +665,33 @@ async def websocket_endpoint(websocket: WebSocket):
                     import traceback
                     traceback.print_exc()
 
+        # 최신 프레임만 일정 주기로 전송 (프레임 드롭 전략)
+        async def image_sender_loop():
+            print("📸 [ImageLoop] 최신 프레임 전송 루프 시작")
+            try:
+                while True:
+                    if websocket.client_state.name != "CONNECTED":
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    now = time.time()
+                    # 최신 프레임이 있고 0.3초 이상 경과 시 전송 (약 3fps)
+                    if latest_image["data"] is not None and (now - last_send_time["ts"] > 0.3):
+                        frame = latest_image["data"]
+                        latest_image["data"] = None  # 가장 최신만 남기고 나머지 드롭
+                        last_send_time["ts"] = now
+                        try:
+                            await session.send_realtime_input(
+                                video=types.Blob(data=frame, mime_type="image/jpeg")
+                            )
+                            print(f"📸 최신 프레임 전송 ({len(frame)} bytes)")
+                        except Exception as e:
+                            print(f"⚠️ 프레임 전송 실패: {e}")
+
+                    await asyncio.sleep(0.01)
+            except Exception as e:
+                print(f"❌ ImageLoop Error: {e}")
+
         # [Task 2] Gemini -> WebSocket (Send to Flutter)
         # 공식 예제 패턴: response.data를 바로 큐에 넣고 스트리밍
         async def send_to_flutter():
@@ -696,8 +706,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         # WebSocket 연결 상태 확인
                         if websocket.client_state.name != "CONNECTED":
-                            print("🔌 [Send] WebSocket 연결이 끊어졌습니다.")
-                            break
+                            print("🔌 [Send] WebSocket 연결이 끊어졌습니다. (루프 유지)")
+                            await asyncio.sleep(0.1)
+                            continue
                         
                         # 공식 예제 패턴: session.receive()를 직접 사용 (오디오 스트리밍)
                         # 중요: 1011 에러를 처리하기 위해 try-except로 감싸기
@@ -705,8 +716,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             async for response in session.receive():
                                 # WebSocket 연결 상태 재확인
                                 if websocket.client_state.name != "CONNECTED":
-                                    print("🔌 [Send] WebSocket 연결이 끊어졌습니다.")
-                                    break
+                                    print("🔌 [Send] WebSocket 연결이 끊어졌습니다. (루프 유지)")
+                                    await asyncio.sleep(0.1)
+                                    continue
                                 
                                 # 공식 예제 패턴: response.data를 바로 전송 (24kHz PCM 오디오 스트리밍)
                                 # 공식 문서: "Output is 24kHz" - response.data는 24kHz PCM 오디오
@@ -984,15 +996,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     traceback.print_exc()
 
         # 태스크 실행 (타임아웃 없이 계속 실행)
-        print("🚀 [Main] 두 코루틴 시작 - receive_from_flutter & send_to_flutter")
+        print("🚀 [Main] 세 코루틴 시작 - receive_from_flutter & image_sender_loop & send_to_flutter")
         try:
-            await asyncio.gather(receive_from_flutter(), send_to_flutter())
+            await asyncio.gather(
+                receive_from_flutter(),
+                image_sender_loop(),
+                send_to_flutter()
+            )
         except Exception as e:
             print(f"❌ [Main] 코루틴 실행 중 오류 발생: {e}")
             import traceback
             traceback.print_exc()
         finally:
-            print("🛑 [Main] 두 코루틴 종료됨")
+            print("🛑 [Main] 세 코루틴 종료됨")
 
 
 # ==========================================
@@ -1015,7 +1031,6 @@ async def main():
         def on_model_speak(text):
             print(f"[🤖 Gemini]: {text}")
             logger.log_message('gemini', text)
-
         print(f"\n🚀 모델({MODEL_ID}) 연결 중...")
         print("📱 Flutter 앱에서 카메라와 오디오를 전송받습니다...")
         print("   (노트북 웹캠은 사용하지 않습니다)")
@@ -1031,67 +1046,6 @@ async def main():
                 while running:
                     try:
                         async for response in session.receive():
-                            response_count += 1
-                            
-                            # [추가] 음성 인식 이벤트 처리 - 사용자 음성을 텍스트로 저장
-                            # Gemini Live API의 response 구조 확인
-                            speech_recognition = None
-                            
-                            # 방법 1: response의 직접 속성
-                            if hasattr(response, 'speech_recognition_event'):
-                                speech_recognition = response.speech_recognition_event
-                            
-                            # 방법 2: server_content 안에 있을 수도 있음
-                            if speech_recognition is None:
-                                server_content_temp = getattr(response, 'server_content', None)
-                                if server_content_temp:
-                                    if hasattr(server_content_temp, 'speech_recognition_event'):
-                                        speech_recognition = server_content_temp.speech_recognition_event
-                            
-                            # 방법 3: response 객체 전체 구조 확인 (처음 몇 번만)
-                            if response_count <= 3:
-                                print(f"🔍 [디버그 #{response_count}] response 타입: {type(response)}")
-                                response_attrs = [attr for attr in dir(response) if not attr.startswith('_')]
-                                print(f"🔍 [디버그] response 속성: {response_attrs[:10]}...")  # 처음 10개만
-                            
-                            if speech_recognition:
-                                print(f"🔍 [디버그] speech_recognition 이벤트 발견! 타입: {type(speech_recognition)}")
-                                # transcript 속성 확인 (다양한 가능한 속성 이름 시도)
-                                recognized_text = None
-                                
-                                # 가능한 속성 이름들 시도
-                                for attr_name in ['transcript', 'text', 'content', 'message']:
-                                    if hasattr(speech_recognition, attr_name):
-                                        attr_value = getattr(speech_recognition, attr_name)
-                                        if attr_value:
-                                            recognized_text = str(attr_value)
-                                            print(f"🔍 [디버그] '{attr_name}' 속성에서 텍스트 발견: {recognized_text[:50]}")
-                                            break
-                                
-                                # 속성을 찾지 못했다면 모든 속성 출력
-                                if recognized_text is None:
-                                    speech_attrs = [attr for attr in dir(speech_recognition) if not attr.startswith('_')]
-                                    print(f"🔍 [디버그] speech_recognition 속성: {speech_attrs}")
-                                    # 값이 있는 속성만 출력
-                                    for attr in speech_attrs:
-                                        try:
-                                            value = getattr(speech_recognition, attr)
-                                            if value and not callable(value):
-                                                print(f"   - {attr}: {value}")
-                                        except:
-                                            pass
-                                
-                                if recognized_text and recognized_text.strip():
-                                    # is_final이 True일 때만 최종 인식된 텍스트를 저장
-                                    is_final = getattr(speech_recognition, 'is_final', False)
-                                    print(f"🔍 [디버그] 인식된 텍스트: '{recognized_text}', is_final: {is_final}")
-                                    if is_final:
-                                        print(f"\n🎤 [사용자 음성 인식] {recognized_text}")
-                                        logger.log_message('user', recognized_text.strip())
-                                    else:
-                                        # 중간 인식 결과는 화면에만 표시 (저장하지 않음)
-                                        print(f"\r🎤 [인식 중...] {recognized_text}", end="", flush=True)
-
                             server_content = response.server_content
                             if server_content is None:
                                 continue
@@ -1138,15 +1092,11 @@ async def main():
 
                             model_turn = server_content.model_turn
                             if model_turn:
-                                parts = getattr(model_turn, 'parts', [])
-                                print(f"🔍 [디버그 #{response_count}] model_turn 발견! parts 개수: {len(parts)}")
-                                
-                                for idx, part in enumerate(parts):
+                                for part in model_turn.parts:
+                                    
                                     # [핵심 수정] "생각(Thought)" 데이터면 출력하지 않고 건너뜀
                                     # google-genai 최신 버전에서는 part.thought 속성으로 구분 가능
-                                    is_thought = getattr(part, "thought", False)
-                                    if is_thought:
-                                        print(f"🔍 [디버그] part[{idx}]는 생각(thought)이므로 건너뜀")
+                                    if getattr(part, "thought", False):
                                         continue
 
                                     # 1. 텍스트 데이터 처리 (우선 처리 - 텍스트가 있으면 저장)
@@ -1261,9 +1211,7 @@ async def main():
 
             # [Task 6] Command Watcher
             async def command_watcher():
-                # 세션이 생성되지 않았으면 종료
                 if not logger.session_ref:
-                    print("⚠️ 세션이 생성되지 않아 command_watcher를 시작할 수 없습니다.")
                     return
 
                 current_session_id = logger.session_ref.id
@@ -1291,10 +1239,10 @@ async def main():
 
             # [Task 5] FastAPI Server (Spring Boot 연동 및 WebSocket)
             # host="0.0.0.0"은 모든 네트워크 인터페이스에서 접근 가능 (모든 IP 주소 포함)
-            # Flutter 앱에서 ws://[PC_IP]:8001/ws/chat으로 연결 (현재 PC IP: 172.30.1.32)
+            # Flutter 앱에서 ws://[PC_IP]:8001/ws/chat으로 연결 (현재 PC IP: 172.30.1.95)
             config = uvicorn.Config(app=app, host="0.0.0.0", port=8001, log_level="info")
             server = uvicorn.Server(config)
-            print(f"🌐 서버 시작: http://0.0.0.0:8001 (Flutter 앱은 ws://172.30.1.32:8001/ws/chat으로 연결)")
+            print(f"🌐 서버 시작: http://0.0.0.0:8001 (Flutter 앱은 ws://172.30.1.95:8001/ws/chat으로 연결)")
 
             tasks = [
                 asyncio.create_task(receive_response()),
@@ -1311,6 +1259,12 @@ async def main():
         traceback.print_exc()
     finally:
         if 'audio_player' in locals(): audio_player.close()
+        if 'input_stream' in locals(): 
+            input_stream.stop_stream()
+            input_stream.close()
+        if 'p' in locals(): p.terminate()
+        if 'cap' in locals(): cap.release()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     asyncio.run(main())

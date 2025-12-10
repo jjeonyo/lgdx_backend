@@ -18,6 +18,7 @@ from typing import List
 import base64
 import json
 import asyncio
+import numpy as np
 
 
 # [Firebase 라이브러리 추가]
@@ -128,7 +129,7 @@ async def perform_summarization(client, session_id):
 
         # Gemini 호출
         resp = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash-lite",
             contents=prompt
         )
         summary_text = resp.text.strip()
@@ -153,6 +154,7 @@ class FirebaseLogger:
     def __init__(self):
         self.session_ref = None
         self.current_turn_text = ""
+        self.last_user_text = ""  # 최근 사용자 발화 저장해 중복 로그 방지
         self.db = None
         self._init_firebase()
         self._start_session()
@@ -519,115 +521,87 @@ async def websocket_endpoint(websocket: WebSocket):
     # Firebase 로거 초기화 (WebSocket 세션별)
     logger = FirebaseLogger()
     
+    # 최신 프레임만 유지하는 컨테이너 (프레임 드롭 전략)
+    latest_image = {"data": None}
+    last_send_time = {"ts": 0.0}
+    
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         print("✅ Gemini Live Session Started")
 
-        # [Task 1] WebSocket -> Gemini (Receive from Flutter)
+        # [Task 1] WebSocket -> Gemini (Receive from Flutter, binary 우선)
         async def receive_from_flutter():
-            print("👂 [Receive] 코루틴 시작 - Flutter 오디오/메시지 수신 대기")
-            
-            # 주의: 침묵 감지 로직 제거
-            # X 버튼을 누를 때만 end_of_turn=True를 전송
-            # 사용자가 말하는 동안에는 턴을 종료하지 않음
-            
+            print("👂 [Receive] 코루틴 시작 - Flutter 바이너리/텍스트 수신 대기")
             try:
                 while True:
                     try:
-                        # 텍스트(JSON)로 수신 (이미지/오디오는 Base64 인코딩됨)
-                        # 타임아웃 설정으로 Deadline expired 에러 방지
-                        data = await asyncio.wait_for(websocket.receive_text(), timeout=300.0)
-                        message = json.loads(data)
-                        
-                        if message['type'] == 'audio':
-                            # 공식 예제 패턴: 16kHz, 16비트 PCM 오디오 전송
-                            # 공식 문서: "오디오를 16비트 PCM, 16kHz, 모노 형식으로 변환하여 전송"
-                            audio_bytes = base64.b64decode(message['data'])
-                            
-                            # 오디오 데이터가 너무 작으면 스킵 (노이즈 방지)
-                            # PCM 16비트 = 2 bytes per sample, 최소 160 samples (10ms) 이상인 경우만 처리
-                            if len(audio_bytes) < 320:  # 160 samples * 2 bytes = 320 bytes
-                                continue  # 너무 작은 오디오는 처리하지 않음
-                            
-                            # 중요: send_realtime_input()은 end_of_turn 파라미터를 지원하지 않음
-                            # 오디오 스트림은 계속 전송되고, 턴 종료는 session.send()로 별도 전송
-                            # AI 턴 완료 후에도 사용자 오디오를 계속 받을 수 있음
-                            try:
-                                await session.send_realtime_input(
-                                    audio=types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
-                                )
-                                
-                                # 디버깅: 오디오 전송 확인 (너무 자주 출력하지 않도록 제한)
-                                # 1초마다 한 번만 출력 (약 62번의 오디오 청크마다)
-                                if not hasattr(receive_from_flutter, 'last_audio_log_time'):
-                                    receive_from_flutter.last_audio_log_time = time.time()
-                                
-                                current_time = time.time()
-                                if current_time - receive_from_flutter.last_audio_log_time >= 1.0:
-                                    print(f"🎤 [Receive] 오디오 수신 및 전송: {len(audio_bytes)} bytes (16kHz PCM) - WebSocket 활성 ✅")
-                                    receive_from_flutter.last_audio_log_time = current_time
-                            except Exception as e:
-                                print(f"⚠️ [Receive] 오디오 전송 실패: {e}")
-                                # 세션이 닫혔거나 문제가 있을 수 있음
-                                raise
-                        elif message['type'] == 'image':
-                            # Base64 -> Bytes -> Gemini
-                            image_bytes = base64.b64decode(message['data'])
-                            await session.send_realtime_input(
-                                video=types.Blob(data=image_bytes, mime_type="image/jpeg")
-                            )
-                        elif message['type'] == 'text':
-                            # 텍스트 메시지 (RAG 검색 등에 활용 가능)
-                            pass
-                        elif message['type'] == 'user_speech_end':
-                            # 사용자가 말을 끝냈다는 명시적 신호 (Flutter에서 전송)
-                            # 자동 VAD가 작동하지만, Flutter에서 명시적으로 신호를 보낼 수도 있음
-                            # 이 경우 end_of_turn=True를 전송하여 AI가 응답을 시작하도록 함
-                            try:
-                                await session.send(
-                                    input=".",  # 빈 입력으로 턴 종료 신호
-                                    end_of_turn=True
-                                )
-                                print("✅ [Receive] 사용자 말하기 종료 신호 수신 - end_of_turn=True 전송 (AI 응답 시작)")
-                            except Exception as e:
-                                print(f"⚠️ [Receive] end_of_turn=True 전송 실패: {e}")
-                        elif message['type'] == 'close_diagnosis' or message['type'] == 'exit_diagnosis':
-                            # 실시간 진단 화면에서 X 버튼을 누른 경우
-                            # 턴을 완료하고 엘리홈으로 돌아가도록 처리
-                            print("❌ [Receive] 진단 화면 종료 신호 수신 (X 버튼 클릭)")
-                            try:
-                                # 1. 현재 턴을 강제로 종료
-                                await session.send(
-                                    input=".",  # 빈 입력으로 턴 종료 신호
-                                    end_of_turn=True
-                                )
-                                print("✅ [Receive] 턴 완료 신호 전송 (X 버튼으로 인한 강제 종료)")
-                                
-                                # 2. Flutter에 턴 완료 및 종료 신호 전송
-                                await websocket.send_json({
-                                    "type": "turn_complete",
-                                    "exit": True  # 엘리홈으로 돌아가라는 신호
-                                })
-                                print("✅ [Receive] Flutter에 종료 신호 전송 완료 (엘리홈으로 이동)")
-                                
-                                # 3. WebSocket 연결은 Flutter에서 닫도록 함 (여기서는 닫지 않음)
-                                # Flutter가 exit: true를 받으면 자동으로 연결을 닫고 엘리홈으로 이동
-                                
-                            except Exception as e:
-                                print(f"⚠️ [Receive] 진단 화면 종료 처리 실패: {e}")
-                                # 실패해도 Flutter에 종료 신호는 보내기
+                        msg = await asyncio.wait_for(websocket.receive(), timeout=300.0)
+
+                        # 바이너리(주로 JPEG 프레임) 처리: 최신 프레임 컨테이너에 덮어쓰기만
+                        if msg.get("type") == "websocket.receive" and msg.get("bytes") is not None:
+                            image_bytes = msg["bytes"]
+                            latest_image["data"] = image_bytes
+                            # 디버그: 크기/해시 확인 (과도한 로그 주의)
+                            # print(f"[DBG] recv binary image bytes={len(image_bytes)}, md5={hashlib.md5(image_bytes).hexdigest()[:10]}")
+                            continue
+
+                        # 텍스트(JSON) 메시지 처리 (오디오/제어 신호)
+                        if msg.get("type") == "websocket.receive" and msg.get("text") is not None:
+                            data = msg["text"]
+                            message = json.loads(data)
+
+                            if message.get('type') == 'audio':
+                                audio_bytes = base64.b64decode(message['data'])
+
+                                if len(audio_bytes) < 320:  # 160 samples * 2 bytes
+                                    continue
+
                                 try:
-                                    await websocket.send_json({
-                                        "type": "turn_complete",
-                                        "exit": True
-                                    })
-                                except:
-                                    pass
+                                    await session.send_realtime_input(
+                                        audio=types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
+                                    )
+                                    if not hasattr(receive_from_flutter, 'last_audio_log_time'):
+                                        receive_from_flutter.last_audio_log_time = time.time()
+                                    current_time = time.time()
+                                    if current_time - receive_from_flutter.last_audio_log_time >= 1.0:
+                                        print(f"🎤 [Receive] 오디오 수신 및 전송: {len(audio_bytes)} bytes (16kHz PCM)")
+                                        receive_from_flutter.last_audio_log_time = current_time
+                                except Exception as e:
+                                    print(f"⚠️ [Receive] 오디오 전송 실패: {e}")
+                                    raise
+
+                            elif message.get('type') == 'text':
+                                # 텍스트 메시지 (필요 시 활용)
+                                pass
+
+                            elif message.get('type') == 'user_speech_end':
+                                try:
+                                    await session.send(input=".", end_of_turn=True)
+                                    print("✅ [Receive] 사용자 말하기 종료 신호 수신 - end_of_turn=True 전송 (AI 응답 시작)")
+                                except Exception as e:
+                                    print(f"⚠️ [Receive] end_of_turn=True 전송 실패: {e}")
+
+                            elif message.get('type') in ('close_diagnosis', 'exit_diagnosis'):
+                                print("❌ [Receive] 진단 화면 종료 신호 수신 (X 버튼 클릭)")
+                                try:
+                                    await session.send(input=".", end_of_turn=True)
+                                    print("✅ [Receive] 턴 완료 신호 전송 (X 버튼으로 인한 강제 종료)")
+                                    await websocket.send_json({"type": "turn_complete", "exit": True})
+                                    print("✅ [Receive] Flutter에 종료 신호 전송 완료 (엘리홈으로 이동)")
+                                except Exception as e:
+                                    print(f"⚠️ [Receive] 진단 화면 종료 처리 실패: {e}")
+                                    try:
+                                        await websocket.send_json({"type": "turn_complete", "exit": True})
+                                    except:
+                                        pass
+                        else:
+                            # 알 수 없는 메시지 유형
+                            continue
+
                     except asyncio.TimeoutError:
-                        # 타임아웃은 정상 (오디오/이미지가 없을 때)
                         continue
                     except WebSocketDisconnect:
                         print("🔌 [Receive] Client Disconnected")
-                        break  # 루프 종료
+                        break
                     except Exception as e:
                         error_str = str(e)
                         if "1011" in error_str or "service is currently unavailable" in error_str.lower():
@@ -637,13 +611,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             except Exception:
                                 pass
                             break
-                        # disconnect 관련 에러는 루프 종료
-                        if "disconnect" in error_str.lower() or "Cannot call" in error_str:
+                        if "disconnect" in error_str.lower() or "cannot call" in error_str.lower():
                             print(f"🔌 [Receive] 연결 종료 감지: {e}")
                             break
                         print(f"⚠️ [Receive] 메시지 처리 에러: {e}")
                         continue
-                        
+
             except WebSocketDisconnect:
                 print("🔌 [Receive] Client Disconnected (외부)")
             except Exception as e:
@@ -655,12 +628,40 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception:
                         pass
                     return
-                if "disconnect" in error_str.lower() or "Cannot call" in error_str:
+                if "disconnect" in error_str.lower() or "cannot call" in error_str.lower():
                     print(f"🔌 [Receive] 연결 종료: {e}")
                 else:
                     print(f"❌ [Receive] WebSocket 에러: {e}")
                     import traceback
                     traceback.print_exc()
+
+        # 최신 프레임만 일정 주기로 전송 (프레임 드롭 전략)
+        async def image_sender_loop():
+            print("📸 [ImageLoop] 최신 프레임 전송 루프 시작")
+            try:
+                while True:
+                    if websocket.client_state.name != "CONNECTED":
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    now = time.time()
+                    # 최신 프레임이 있고 0.3초 이상 경과 시 전송 (약 3fps), 모션 게이팅 없이 즉시 전송
+                    if latest_image["data"] is not None and (now - last_send_time["ts"] > 0.3):
+                        frame = latest_image["data"]
+                        latest_image["data"] = None  # 가장 최신만 남기고 나머지 드롭
+                        last_send_time["ts"] = now
+
+                        try:
+                            await session.send_realtime_input(
+                                video=types.Blob(data=frame, mime_type="image/jpeg")
+                            )
+                            print(f"📸 프레임 전송 ({len(frame)} bytes)")
+                        except Exception as e:
+                            print(f"⚠️ 프레임 전송 실패: {e}")
+
+                    await asyncio.sleep(0.01)
+            except Exception as e:
+                print(f"❌ ImageLoop Error: {e}")
 
         # [Task 2] Gemini -> WebSocket (Send to Flutter)
         # 공식 예제 패턴: response.data를 바로 큐에 넣고 스트리밍
@@ -676,8 +677,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         # WebSocket 연결 상태 확인
                         if websocket.client_state.name != "CONNECTED":
-                            print("🔌 [Send] WebSocket 연결이 끊어졌습니다.")
-                            break
+                            print("🔌 [Send] WebSocket 연결이 끊어졌습니다. (루프 유지)")
+                            await asyncio.sleep(0.1)
+                            continue
                         
                         # 공식 예제 패턴: session.receive()를 직접 사용 (오디오 스트리밍)
                         # 중요: 1011 에러를 처리하기 위해 try-except로 감싸기
@@ -685,8 +687,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             async for response in session.receive():
                                 # WebSocket 연결 상태 재확인
                                 if websocket.client_state.name != "CONNECTED":
-                                    print("🔌 [Send] WebSocket 연결이 끊어졌습니다.")
-                                    break
+                                    print("🔌 [Send] WebSocket 연결이 끊어졌습니다. (루프 유지)")
+                                    await asyncio.sleep(0.1)
+                                    continue
                                 
                                 # 공식 예제 패턴: response.data를 바로 전송 (24kHz PCM 오디오 스트리밍)
                                 # 공식 문서: "Output is 24kHz" - response.data는 24kHz PCM 오디오
@@ -964,15 +967,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     traceback.print_exc()
 
         # 태스크 실행 (타임아웃 없이 계속 실행)
-        print("🚀 [Main] 두 코루틴 시작 - receive_from_flutter & send_to_flutter")
+        print("🚀 [Main] 세 코루틴 시작 - receive_from_flutter & image_sender_loop & send_to_flutter")
         try:
-            await asyncio.gather(receive_from_flutter(), send_to_flutter())
+            await asyncio.gather(
+                receive_from_flutter(),
+                image_sender_loop(),
+                send_to_flutter()
+            )
         except Exception as e:
             print(f"❌ [Main] 코루틴 실행 중 오류 발생: {e}")
             import traceback
             traceback.print_exc()
         finally:
-            print("🛑 [Main] 두 코루틴 종료됨")
+            print("🛑 [Main] 세 코루틴 종료됨")
 
 
 # ==========================================
@@ -1203,10 +1210,10 @@ async def main():
 
             # [Task 5] FastAPI Server (Spring Boot 연동 및 WebSocket)
             # host="0.0.0.0"은 모든 네트워크 인터페이스에서 접근 가능 (모든 IP 주소 포함)
-            # Flutter 앱에서 ws://[PC_IP]:8001/ws/chat으로 연결 (현재 PC IP: 172.30.1.32)
+            # Flutter 앱에서 ws://[PC_IP]:8001/ws/chat으로 연결 (현재 PC IP: 172.30.1.95)
             config = uvicorn.Config(app=app, host="0.0.0.0", port=8001, log_level="info")
             server = uvicorn.Server(config)
-            print(f"🌐 서버 시작: http://0.0.0.0:8001 (Flutter 앱은 ws://172.30.1.32:8001/ws/chat으로 연결)")
+            print(f"🌐 서버 시작: http://0.0.0.0:8001 (Flutter 앱은 ws://172.30.1.95:8001/ws/chat으로 연결)")
 
             tasks = [
                 asyncio.create_task(receive_response()),
@@ -1223,13 +1230,9 @@ async def main():
         traceback.print_exc()
     finally:
         if 'audio_player' in locals(): audio_player.close()
-
-    except Exception as e:
-        print(f"오류 발생: {e}")
-        traceback.print_exc()
-    finally:
-        if 'audio_player' in locals(): audio_player.close()
-        if 'input_stream' in locals(): input_stream.stop_stream(); input_stream.close()
+        if 'input_stream' in locals(): 
+            input_stream.stop_stream()
+            input_stream.close()
         if 'p' in locals(): p.terminate()
         if 'cap' in locals(): cap.release()
         cv2.destroyAllWindows()
