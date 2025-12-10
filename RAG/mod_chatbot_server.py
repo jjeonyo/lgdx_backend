@@ -428,6 +428,7 @@ async def chat_endpoint(req: ChatRequest):
 # 실제로는 DB나 Redis를 써야 하지만, 간단한 데모를 위해 메모리에 상태 저장
 # key: video_id (또는 user_id), value: {'status': '...', 'url': '...'}
 video_generation_status = {}
+_initial_mp4_count = None  # /generate/assets_generate 폴더의 초기 mp4 개수 기록용
 
 @app.post("/generate-video")
 async def generate_video_endpoint():
@@ -446,6 +447,12 @@ async def generate_video_endpoint():
         # 실제 앱에서는 user_id 등을 받아야 함. 여기선 'demo_video'라는 고정 ID 사용
         video_generation_status['demo_video'] = {'status': 'processing'}
 
+        # 시작 시점에 mp4 파일 개수 기록
+        global _initial_mp4_count
+        assets_dir = current_dir.parent / "generate" / "assets_generate"
+        assets_dir.mkdir(exist_ok=True)
+        _initial_mp4_count = len(list(assets_dir.glob("*.mp4")))
+
         # Run the script asynchronously using subprocess
         # 스크립트가 완료되면 파일을 생성하거나 DB를 업데이트한다고 가정
         # 여기서는 단순히 스크립트를 실행하고, 폴링 시 파일 존재 여부를 확인할 수도 있음
@@ -459,40 +466,42 @@ async def generate_video_endpoint():
 
 @app.get("/check-video-status")
 async def check_video_status():
-    # 1. 생성된 파일이 있는지 확인하는 로직
-    # lgdx_backend/generate/assets_generate/ 폴더 확인
+    """
+    assets_generate 폴더의 mp4 개수를 관찰하여
+    초기 개수 대비 1개 이상 증가하면 생성 완료로 판단.
+    """
     try:
         base_dir = Path(__file__).parent.parent / "generate" / "assets_generate"
-        
-        # 가장 최근에 생성된 mp4 파일 찾기
         if not base_dir.exists():
-             return {"status": "processing"}
-             
-        mp4_files = list(base_dir.glob("*.mp4"))
-        if not mp4_files:
             return {"status": "processing"}
-            
-        # 최신 파일 찾기
+
+        mp4_files = list(base_dir.glob("*.mp4"))
+        current_count = len(mp4_files)
+
+        global _initial_mp4_count
+        if _initial_mp4_count is None:
+            # generate-video가 먼저 호출되지 않은 경우 대비해서 초기값 설정
+            _initial_mp4_count = current_count
+            return {"status": "processing"}
+
+        if current_count <= _initial_mp4_count:
+            return {"status": "processing"}
+
+        # 개수가 증가했으면 가장 최신 파일을 완료된 결과로 간주
         latest_file = max(mp4_files, key=os.path.getctime)
-        
-        # 파일이 생성된지 얼마 안 되었으면(예: 1분 이내) 완료로 간주
-        # 실제로는 generate.py가 완료 신호를 어딘가(DB/파일)에 남기는 게 정확함
-        # 여기서는 파일 존재만으로 체크
-        
-        # 클라이언트에서 접근 가능한 URL로 변환 필요
-        # 지금은 로컬 파일 경로를 리턴하거나, 별도 정적 파일 서빙 설정 필요
-        # 데모용: 파일명 리턴 (외부 접속을 위해 0.0.0.0 또는 호스트 IP 사용 권장, 여기선 예시로 localhost 유지하나 실제론 앱에서 접근 가능한 주소여야 함)
-        # 앱에서 접근하려면 실행 서버의 IP가 필요함. 
-        
-        # (임시) 서버 IP를 알 수 없으면 상대 경로만 리턴하고 앱에서 Base URL 붙여서 쓰게 할 수도 있음
+        size = os.path.getsize(latest_file)
+        created_at_iso = datetime.fromtimestamp(os.path.getmtime(latest_file)).isoformat()
+
         return {
-            "status": "completed", 
-            "video_url": f"/assets/{latest_file.name}" 
+            "status": "completed",
+            "video_url": f"/assets/{latest_file.name}",
+            "video_created_at": created_at_iso,
+            "video_size": size,
         }
-        
+
     except Exception as e:
         print(f"Check status error: {e}")
-        return {"status": "processing"}
+        return {"status": "failed"}
 
 # -------------------------------------------------------
 # [API 2] 채팅 내역 불러오기 (History)
