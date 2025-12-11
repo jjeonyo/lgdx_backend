@@ -6,7 +6,6 @@ import datetime
 from dotenv import load_dotenv
 import google.genai as genai
 from google.genai import types
-from openai import OpenAI
 from PIL import Image
 import time
 import socket
@@ -22,11 +21,10 @@ from firebase_admin import storage
 project_root = Path(__file__).resolve().parents[1]
 load_dotenv(project_root / ".env")
 API_KEY = os.getenv("google_api")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Firebase 설정 (vision.py와 동일한 키 사용)
 # serviceAccountKey.json은 프로젝트 루트에 위치함
-FIREBASE_KEY_PATH = Path("C:\dxfirebasekey\serviceAccountKey.json")
+FIREBASE_KEY_PATH = Path(r"C:\dxfirebasekey\serviceAccountKey.json")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET") # .env에서 버킷 이름 로드
 
 if not FIREBASE_STORAGE_BUCKET:
@@ -51,13 +49,9 @@ if not FIREBASE_KEY_PATH.exists():
 if not API_KEY:
     print("❌ API 키가 없습니다. .env 파일을 확인하거나 코드를 수정하세요.")
     exit()
-if not OPENAI_API_KEY:
-    print("❌ OPENAI_API_KEY가 없습니다. .env 파일에 OpenAI 키를 추가하세요.")
-    exit()
 
 # 클라이언트 초기화
 client = genai.Client(api_key=API_KEY)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 def get_host_ip():
     """현재 서버의 로컬 IP 주소를 반환합니다."""
@@ -168,15 +162,16 @@ def create_visual_prompt(conversation_context):
     print("🤔 대화 내용 분석 및 프롬프트 작성 중...")
     
     prompt_instruction = f"""
-    이 대화를 바탕으로 세탁기에 관한 문제를 해결하는 영상을 생성하는 프롬프트를 작성해.
-    대화 맥락에서 사용자가 해결하고 싶어하는 특정 문제의 맥락을 도출해.
+    Analyze the following conversation history between a user and an AI assistant about a washing machine problem.
+    Identify the specific problem or the solution being discussed.
     
     [Conversation History]
     {conversation_context}
     
-    영상의 총 길이는 3.5초이고, 영상 형태는 숏폼이나 릴스같은 세로형 비율의 형식으로 만들어 줘.
-    음성 더빙을 한다면 3초 안에 모든 대사가 발화되도록 해야 해
-    오른쪽 상단에 LG ELLE라는 워터마크를 작게 붙여줘.
+    Based on this, create a high-quality, cinematic, and detailed visual prompt for a video generation model.
+    The video should depict the solution or the maintenance step clearly.
+    Focus on realistic textures, lighting, and clear action. the video will be 6 seconds long.
+ 
     """
 
 
@@ -263,29 +258,30 @@ def save_video_message_to_firestore(session_id, video_url):
 def generate_solution_video(visual_prompt, output_filename="solution.mp4"):
     print("🎥 비디오 생성 중... (시간이 소요될 수 있습니다)")
     try:
-        video = openai_client.videos.create(
-            model="sora-2",
+        operation = client.models.generate_videos(
+            model="veo-3.1-fast-generate-preview",
             prompt=visual_prompt,
-            seconds='4',             
+            config=types.GenerateVideosConfig(
+                aspect_ratio="9:16",
+                duration_seconds=8,
             )
+        )
 
-        # 상태 폴링
-        while video.status in ("in_progress", "queued"):
+        while not operation.done:
+            print("Waiting for video generation to complete...")
             time.sleep(3)
-            video = openai_client.videos.retrieve(video.id)
-            progress = getattr(video, "progress", 0)
-            print(f"⏳ 상태: {video.status}, 진행률: {progress}%")
+            operation = client.operations.get(operation)
 
-        if video.status == "failed":
-            message = getattr(getattr(video, "error", None), "message", "Video generation failed")
-            print(f"❌ 생성 실패: {message}")
+        # Download the generated video.
+        if operation.response.generated_videos:
+            generated_video = operation.response.generated_videos[0]
+            client.files.download(file=generated_video.video)
+            generated_video.video.save(output_filename)
+            print(f"✅ Generated video saved to {output_filename}")
+            return output_filename
+        else:
+            print("❌ 비디오가 생성되지 않았습니다.")
             return None
-
-        # 완료 시 다운로드
-        content = openai_client.videos.download_content(video.id, variant="video")
-        content.write_to_file(output_filename)
-        print(f"✅ Generated video saved to {output_filename}")
-        return output_filename
 
     except Exception as e:
         print(f"❌ 비디오 생성 오류: {e}")
