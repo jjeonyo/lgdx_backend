@@ -183,7 +183,11 @@ def get_host_ip():
     except Exception:
         return "localhost"
 
-SERVER_IP = get_host_ip()
+# 고정 IP를 우선 사용하고, 환경변수 SERVER_IP가 "auto"면 자동 탐지
+SERVER_IP = os.getenv("SERVER_IP") or "172.20.10.4"
+if SERVER_IP == "auto":
+    SERVER_IP = get_host_ip()
+
 print(f"🌐 Server IP: {SERVER_IP}")
 
 

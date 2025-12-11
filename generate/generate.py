@@ -20,11 +20,11 @@ from firebase_admin import storage
 
 project_root = Path(__file__).resolve().parents[1]
 load_dotenv(project_root / ".env")
-API_KEY = os.getenv("GOOGLE_API_KEY")
+API_KEY = os.getenv("google_api")
 
 # Firebase 설정 (vision.py와 동일한 키 사용)
 # serviceAccountKey.json은 프로젝트 루트에 위치함
-FIREBASE_KEY_PATH = project_root / "serviceAccountKey.json"
+FIREBASE_KEY_PATH = Path(r"C:\dxfirebasekey\serviceAccountKey.json")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET") # .env에서 버킷 이름 로드
 
 if not FIREBASE_STORAGE_BUCKET:
@@ -263,7 +263,7 @@ def generate_solution_video(visual_prompt, output_filename="solution.mp4"):
             prompt=visual_prompt,
             config=types.GenerateVideosConfig(
                 aspect_ratio="9:16",
-                duration_seconds=4,
+                duration_seconds=8,
             )
         )
 
