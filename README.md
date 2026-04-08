@@ -1,3 +1,10 @@
+## lgdx_backend
+
+이 저장소는 `lgdx_frontend`와 함께 동작하는 하나의 프로젝트에서 백엔드 역할을 담당합니다.
+
+- 프로젝트 개요: [PROJECT_OVERVIEW.md](./PROJECT_OVERVIEW.md)
+- 프론트엔드 저장소: `lgdx_frontend`
+
 <svg width="100%" viewBox="0 0 680 920" xmlns="http://www.w3.org/2000/svg">
 <style>
   @media (prefers-color-scheme: light) {
